@@ -25,6 +25,7 @@ pub struct RuntimeConfig {
     pub snapshot_every_events: usize,
     pub snapshot_every_ms: i64,
     pub max_markets_per_connection: usize,
+    pub discovery_max_attempts: usize,
     pub reconnect_backoff_ms: u64,
     pub reconnect_backoff_cap_ms: u64,
 }
@@ -36,6 +37,7 @@ impl Default for RuntimeConfig {
             snapshot_every_events: 100,
             snapshot_every_ms: 60_000,
             max_markets_per_connection: 25,
+            discovery_max_attempts: 5,
             reconnect_backoff_ms: 1_000,
             reconnect_backoff_cap_ms: 30_000,
         }
@@ -108,6 +110,38 @@ where
             .map_err(|error| RuntimeError::Other(error.to_string()))?;
         self.store.upsert_markets(&markets).await?;
         Ok(markets)
+    }
+
+    pub async fn discover_markets_with_retry<A: VenueAdapter>(
+        &self,
+        rest: &dyn RestClient,
+        adapter: &A,
+    ) -> DynResult<Vec<NormalizedMarket>> {
+        let max_attempts = self.config.discovery_max_attempts.max(1);
+        let mut attempt = 0usize;
+        let mut backoff_ms = self.config.reconnect_backoff_ms.max(1);
+
+        loop {
+            attempt += 1;
+            match self.discover_markets(rest, adapter).await {
+                Ok(markets) => return Ok(markets),
+                Err(error) => {
+                    if attempt >= max_attempts {
+                        return Err(error);
+                    }
+                    tracing::warn!(
+                        venue = %adapter.venue().as_str(),
+                        attempt,
+                        max_attempts,
+                        backoff_ms,
+                        error = %error,
+                        "market discovery failed, retrying"
+                    );
+                    self.clock.sleep(Duration::from_millis(backoff_ms)).await;
+                    backoff_ms = (backoff_ms * 2).min(self.config.reconnect_backoff_cap_ms);
+                }
+            }
+        }
     }
 
     pub async fn open_market_session(
@@ -220,36 +254,80 @@ where
         W: WsClient + Clone + Send + Sync + 'static,
     {
         let run_id = self.bootstrap_run().await?;
-        let binance = self.discover_markets(&rest, &BinanceAdapter).await?;
-        let hyperliquid = self.discover_markets(&rest, &HyperliquidAdapter).await?;
-        let lighter_adapter = LighterAdapter::default();
-        let lighter = self.discover_markets(&rest, &lighter_adapter).await?;
-
         let mut tasks = Vec::new();
-        for batch in split_batches(binance, self.config.max_markets_per_connection) {
-            let runtime = self.owned_clone();
-            let rest = rest.clone();
-            let ws = ws.clone();
-            tasks.push(tokio::spawn(async move {
-                runtime.run_binance_batch(run_id, rest, ws, batch).await
-            }));
+
+        match self
+            .discover_markets_with_retry(&rest, &BinanceAdapter)
+            .await
+        {
+            Ok(binance) if !binance.is_empty() => {
+                for batch in split_batches(binance, self.config.max_markets_per_connection) {
+                    let runtime = self.owned_clone();
+                    let rest = rest.clone();
+                    let ws = ws.clone();
+                    tasks.push(tokio::spawn(async move {
+                        runtime.run_binance_batch(run_id, rest, ws, batch).await
+                    }));
+                }
+            }
+            Ok(_) => {
+                tracing::warn!("binance discovery returned no active markets");
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "binance discovery failed after retries");
+            }
         }
-        for batch in split_batches(hyperliquid, self.config.max_markets_per_connection) {
-            let runtime = self.owned_clone();
-            let ws = ws.clone();
-            tasks.push(tokio::spawn(async move {
-                runtime
-                    .run_generic_batch(run_id, ws, HyperliquidAdapter, batch)
-                    .await
-            }));
+
+        match self
+            .discover_markets_with_retry(&rest, &HyperliquidAdapter)
+            .await
+        {
+            Ok(hyperliquid) if !hyperliquid.is_empty() => {
+                for batch in split_batches(hyperliquid, self.config.max_markets_per_connection) {
+                    let runtime = self.owned_clone();
+                    let ws = ws.clone();
+                    tasks.push(tokio::spawn(async move {
+                        runtime
+                            .run_generic_batch(run_id, ws, HyperliquidAdapter, batch)
+                            .await
+                    }));
+                }
+            }
+            Ok(_) => {
+                tracing::warn!("hyperliquid discovery returned no active markets");
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "hyperliquid discovery failed after retries");
+            }
         }
-        for batch in split_batches(lighter, self.config.max_markets_per_connection) {
-            let runtime = self.owned_clone();
-            let ws = ws.clone();
-            let adapter = lighter_adapter.clone();
-            tasks.push(tokio::spawn(async move {
-                runtime.run_generic_batch(run_id, ws, adapter, batch).await
-            }));
+
+        let lighter_adapter = LighterAdapter::default();
+        match self
+            .discover_markets_with_retry(&rest, &lighter_adapter)
+            .await
+        {
+            Ok(lighter) if !lighter.is_empty() => {
+                for batch in split_batches(lighter, self.config.max_markets_per_connection) {
+                    let runtime = self.owned_clone();
+                    let ws = ws.clone();
+                    let adapter = lighter_adapter.clone();
+                    tasks.push(tokio::spawn(async move {
+                        runtime.run_generic_batch(run_id, ws, adapter, batch).await
+                    }));
+                }
+            }
+            Ok(_) => {
+                tracing::warn!("lighter discovery returned no active markets");
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "lighter discovery failed after retries");
+            }
+        }
+
+        if tasks.is_empty() {
+            return Err(
+                RuntimeError::Other("no venue bootstrapped successfully".to_string()).into(),
+            );
         }
 
         tokio::signal::ctrl_c().await?;
@@ -540,7 +618,15 @@ pub struct ReqwestRestClient {
 impl ReqwestRestClient {
     pub fn new() -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .http1_only()
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(20))
+                .pool_idle_timeout(Duration::from_secs(30))
+                .tcp_keepalive(Duration::from_secs(30))
+                .user_agent("tokenresearch/0.1")
+                .build()
+                .expect("reqwest client should build"),
         }
     }
 }

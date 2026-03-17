@@ -1,7 +1,7 @@
 mod common;
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -18,6 +18,7 @@ use tokenresearch::traits::{Clock, DynResult, RestClient};
 #[derive(Clone, Default)]
 struct FakeClock {
     now_ms: i64,
+    sleeps: Arc<Mutex<Vec<Duration>>>,
 }
 
 #[async_trait]
@@ -26,21 +27,38 @@ impl Clock for FakeClock {
         self.now_ms
     }
 
-    async fn sleep(&self, _duration: Duration) {}
+    async fn sleep(&self, duration: Duration) {
+        self.sleeps.lock().expect("lock").push(duration);
+    }
 }
 
 #[derive(Clone, Default)]
 struct FakeRest {
     responses: Arc<HashMap<String, String>>,
+    transient_failures: Arc<Mutex<HashMap<String, usize>>>,
 }
 
 #[async_trait]
 impl RestClient for FakeRest {
     async fn get_text(&self, url: &str) -> DynResult<String> {
+        let mut failures = self.transient_failures.lock().expect("lock");
+        if let Some(remaining) = failures.get_mut(url) {
+            if *remaining > 0 {
+                *remaining -= 1;
+                return Err("transient get failure".into());
+            }
+        }
         Ok(self.responses.get(url).cloned().expect("response"))
     }
 
     async fn post_json_text(&self, url: &str, _body: &Value) -> DynResult<String> {
+        let mut failures = self.transient_failures.lock().expect("lock");
+        if let Some(remaining) = failures.get_mut(url) {
+            if *remaining > 0 {
+                *remaining -= 1;
+                return Err("transient post failure".into());
+            }
+        }
         Ok(self.responses.get(url).cloned().expect("response"))
     }
 }
@@ -50,7 +68,10 @@ async fn runtime_discovers_markets_and_persists_synced_events() {
     let dir = tempdir().expect("tempdir");
     let db_path = dir.path().join("collector.sqlite");
     let store = Arc::new(SqliteBookStore::connect(&db_path).await.expect("connect"));
-    let clock = Arc::new(FakeClock { now_ms: 10_000 });
+    let clock = Arc::new(FakeClock {
+        now_ms: 10_000,
+        sleeps: Arc::new(Mutex::new(Vec::new())),
+    });
     let runtime = CollectorRuntime::new(
         store.clone(),
         clock,
@@ -69,6 +90,7 @@ async fn runtime_discovers_markets_and_persists_synced_events() {
             "https://fapi.binance.com/fapi/v1/exchangeInfo".to_string(),
             common::fixture("binance/exchange_info.json"),
         )])),
+        transient_failures: Arc::new(Mutex::new(HashMap::new())),
     };
     let markets = runtime
         .discover_markets(&rest, &adapter)
@@ -111,4 +133,44 @@ async fn runtime_discovers_markets_and_persists_synced_events() {
         .expect("latest")
         .expect("book");
     assert_eq!(latest.bids[0].quantity.to_string(), "1.7");
+}
+
+#[tokio::test]
+async fn discovery_retries_after_transient_rest_failure() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("collector.sqlite");
+    let store = Arc::new(SqliteBookStore::connect(&db_path).await.expect("connect"));
+    let sleeps = Arc::new(Mutex::new(Vec::new()));
+    let clock = Arc::new(FakeClock {
+        now_ms: 10_000,
+        sleeps: sleeps.clone(),
+    });
+    let runtime = CollectorRuntime::new(
+        store,
+        clock,
+        RuntimeConfig {
+            database_path: db_path.display().to_string(),
+            snapshot_every_events: 1,
+            snapshot_every_ms: 1,
+            discovery_max_attempts: 3,
+            ..RuntimeConfig::default()
+        },
+    );
+    runtime.bootstrap_run().await.expect("run");
+
+    let url = "https://fapi.binance.com/fapi/v1/exchangeInfo".to_string();
+    let rest = FakeRest {
+        responses: Arc::new(HashMap::from([(
+            url.clone(),
+            common::fixture("binance/exchange_info.json"),
+        )])),
+        transient_failures: Arc::new(Mutex::new(HashMap::from([(url, 1_usize)]))),
+    };
+
+    let markets = runtime
+        .discover_markets_with_retry(&rest, &BinanceAdapter)
+        .await
+        .expect("discovery should recover");
+    assert_eq!(markets.len(), 2);
+    assert_eq!(sleeps.lock().expect("lock").len(), 1);
 }

@@ -1,12 +1,10 @@
 use std::time::Duration;
 
-use tokio::time::timeout;
-use tokenresearch::adapters::{
-    BinanceAdapter, HyperliquidAdapter, LighterAdapter, VenueAdapter,
-};
+use tokenresearch::adapters::{BinanceAdapter, HyperliquidAdapter, LighterAdapter, VenueAdapter};
 use tokenresearch::model::{EventKind, MarketStatus};
 use tokenresearch::runtime::{ReqwestRestClient, TokioWsClient};
 use tokenresearch::traits::{RestClient, WsClient};
+use tokio::time::timeout;
 
 async fn fetch_markets<A: VenueAdapter>(
     rest: &ReqwestRestClient,

@@ -1,6 +1,7 @@
 database_path = "tokenresearch.sqlite"
-snapshot_every_events = 100
+snapshot_every_events = 500
 snapshot_every_ms = 60000
 max_markets_per_connection = 25
+discovery_max_attempts = 5
 reconnect_backoff_ms = 1000
 reconnect_backoff_cap_ms = 30000

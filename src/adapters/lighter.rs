@@ -174,7 +174,11 @@ impl VenueAdapter for LighterAdapter {
                         channel
                             .rsplit_once('/')
                             .map(|(_, suffix)| suffix.to_string())
-                            .or_else(|| channel.rsplit_once(':').map(|(_, suffix)| suffix.to_string()))
+                            .or_else(|| {
+                                channel
+                                    .rsplit_once(':')
+                                    .map(|(_, suffix)| suffix.to_string())
+                            })
                     })
             })
             .ok_or(AdapterError::MissingField("market_id"))?;
