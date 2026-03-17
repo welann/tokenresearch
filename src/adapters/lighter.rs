@@ -151,7 +151,10 @@ impl VenueAdapter for LighterAdapter {
         received_ts_ms: i64,
     ) -> Result<Option<NormalizedBookEvent>, AdapterError> {
         let parsed: Value = serde_json::from_str(raw)?;
-        if parsed.get("type").and_then(Value::as_str) == Some("subscribed") {
+        if matches!(
+            parsed.get("type").and_then(Value::as_str),
+            Some("subscribed" | "connected" | "pong")
+        ) {
             return Ok(None);
         }
 
@@ -167,7 +170,12 @@ impl VenueAdapter for LighterAdapter {
                 parsed
                     .get("channel")
                     .and_then(Value::as_str)
-                    .and_then(|channel| channel.rsplit('/').next().map(str::to_string))
+                    .and_then(|channel| {
+                        channel
+                            .rsplit_once('/')
+                            .map(|(_, suffix)| suffix.to_string())
+                            .or_else(|| channel.rsplit_once(':').map(|(_, suffix)| suffix.to_string()))
+                    })
             })
             .ok_or(AdapterError::MissingField("market_id"))?;
 
