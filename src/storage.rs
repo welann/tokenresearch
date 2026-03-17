@@ -155,7 +155,8 @@ impl SqliteBookStore {
             SqliteConnectOptions::from_str(&format!("sqlite://{}", path.as_ref().display()))?
                 .create_if_missing(true);
         let pool = SqlitePoolOptions::new()
-            .max_connections(5)
+            .max_connections(1)
+            .min_connections(1)
             .connect_with(options)
             .await?;
         Ok(Self { pool })

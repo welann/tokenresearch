@@ -7,7 +7,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::adapters::{
     BinanceAdapter, HttpMethod, HyperliquidAdapter, LighterAdapter, VenueAdapter,
@@ -59,11 +59,22 @@ pub struct MarketSession {
     pub last_snapshot_at_ms: Option<i64>,
 }
 
-#[derive(Clone)]
 pub struct CollectorRuntime<S, C> {
     store: Arc<S>,
+    writer: Arc<Mutex<Option<StoreWriterHandle>>>,
     clock: Arc<C>,
     config: RuntimeConfig,
+}
+
+impl<S, C> Clone for CollectorRuntime<S, C> {
+    fn clone(&self) -> Self {
+        Self {
+            store: self.store.clone(),
+            writer: self.writer.clone(),
+            clock: self.clock.clone(),
+            config: self.config.clone(),
+        }
+    }
 }
 
 impl<S, C> CollectorRuntime<S, C>
@@ -74,6 +85,7 @@ where
     pub fn new(store: Arc<S>, clock: Arc<C>, config: RuntimeConfig) -> Self {
         Self {
             store,
+            writer: Arc::new(Mutex::new(None)),
             clock,
             config,
         }
@@ -82,6 +94,7 @@ where
     fn owned_clone(&self) -> Self {
         Self {
             store: self.store.clone(),
+            writer: self.writer.clone(),
             clock: self.clock.clone(),
             config: self.config.clone(),
         }
@@ -89,7 +102,9 @@ where
 
     pub async fn bootstrap_run(&self) -> DynResult<i64> {
         self.store.init().await?;
-        self.store.start_run(self.clock.now_ms()).await
+        let run_id = self.store.start_run(self.clock.now_ms()).await?;
+        self.ensure_writer().await;
+        Ok(run_id)
     }
 
     pub async fn discover_markets<A: VenueAdapter>(
@@ -144,6 +159,22 @@ where
         }
     }
 
+    async fn ensure_writer(&self) {
+        let mut guard = self.writer.lock().await;
+        if guard.is_none() {
+            *guard = Some(StoreWriterHandle::spawn(self.store.clone()));
+        }
+    }
+
+    async fn writer(&self) -> DynResult<StoreWriterHandle> {
+        self.ensure_writer().await;
+        self.writer
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| RuntimeError::Other("store writer not initialized".to_string()).into())
+    }
+
     pub async fn open_market_session(
         &self,
         run_id: i64,
@@ -152,7 +183,8 @@ where
     ) -> DynResult<MarketSession> {
         let now_ms = self.clock.now_ms();
         let epoch_id = self
-            .store
+            .writer()
+            .await?
             .open_epoch(run_id, market, epoch_seq, now_ms)
             .await?;
         Ok(MarketSession {
@@ -191,12 +223,14 @@ where
         outcome: SyncOutcome,
     ) -> DynResult<()> {
         if outcome.needs_resync && outcome.epoch_seq != session.epoch_seq {
-            self.store
+            self.writer()
+                .await?
                 .close_epoch(session.epoch_id, self.clock.now_ms(), "resync")
                 .await?;
             session.epoch_seq = outcome.epoch_seq;
             session.epoch_id = self
-                .store
+                .writer()
+                .await?
                 .open_epoch(
                     session.run_id,
                     &current_book.market,
@@ -228,7 +262,8 @@ where
             book: current_book.clone(),
         });
 
-        self.store
+        self.writer()
+            .await?
             .commit_batch(CommitBatch {
                 market: current_book.market.clone(),
                 epoch_id: session.epoch_id,
@@ -519,7 +554,8 @@ where
         let now_ms = self.clock.now_ms();
         for (session, state) in states.values_mut() {
             let market = state.market().clone();
-            self.store
+            self.writer()
+                .await?
                 .commit_batch(CommitBatch {
                     market: market.clone(),
                     epoch_id: session.epoch_id,
@@ -538,12 +574,14 @@ where
                     }],
                 })
                 .await?;
-            self.store
+            self.writer()
+                .await?
                 .close_epoch(session.epoch_id, now_ms, reason)
                 .await?;
             session.epoch_seq += 1;
             session.epoch_id = self
-                .store
+                .writer()
+                .await?
                 .open_epoch(session.run_id, &market, session.epoch_seq, now_ms)
                 .await?;
             state.reset();
@@ -590,6 +628,136 @@ fn split_batches<T>(items: Vec<T>, batch_size: usize) -> Vec<Vec<T>> {
         batches.push(current);
     }
     batches
+}
+
+#[derive(Clone, Debug)]
+struct StoreWriterHandle {
+    tx: mpsc::Sender<StoreCommand>,
+}
+
+impl StoreWriterHandle {
+    fn spawn<S>(store: Arc<S>) -> Self
+    where
+        S: BookStore + 'static,
+    {
+        let (tx, mut rx) = mpsc::channel::<StoreCommand>(1024);
+        tokio::spawn(async move {
+            while let Some(command) = rx.recv().await {
+                match command {
+                    StoreCommand::OpenEpoch {
+                        run_id,
+                        market,
+                        epoch_seq,
+                        started_at_ms,
+                        reply,
+                    } => {
+                        let _ = reply.send(
+                            store
+                                .open_epoch(run_id, &market, epoch_seq, started_at_ms)
+                                .await,
+                        );
+                    }
+                    StoreCommand::CloseEpoch {
+                        epoch_id,
+                        ended_at_ms,
+                        reason,
+                        reply,
+                    } => {
+                        let _ = reply.send(store.close_epoch(epoch_id, ended_at_ms, &reason).await);
+                    }
+                    StoreCommand::CommitBatch { batch, reply } => {
+                        let _ = reply.send(store.commit_batch(batch).await);
+                    }
+                }
+            }
+        });
+        Self { tx }
+    }
+
+    async fn open_epoch(
+        &self,
+        run_id: i64,
+        market: &MarketRef,
+        epoch_seq: i64,
+        started_at_ms: i64,
+    ) -> DynResult<i64> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(StoreCommand::OpenEpoch {
+                run_id,
+                market: market.clone(),
+                epoch_seq,
+                started_at_ms,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| RuntimeError::Other("store writer task stopped".to_string()))?;
+        reply_rx
+            .await
+            .map_err(|_| -> Box<dyn std::error::Error + Send + Sync> {
+                Box::new(RuntimeError::Other(
+                    "store writer dropped open_epoch reply".to_string(),
+                ))
+            })?
+    }
+
+    async fn close_epoch(&self, epoch_id: i64, ended_at_ms: i64, reason: &str) -> DynResult<()> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(StoreCommand::CloseEpoch {
+                epoch_id,
+                ended_at_ms,
+                reason: reason.to_string(),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| RuntimeError::Other("store writer task stopped".to_string()))?;
+        reply_rx
+            .await
+            .map_err(|_| -> Box<dyn std::error::Error + Send + Sync> {
+                Box::new(RuntimeError::Other(
+                    "store writer dropped close_epoch reply".to_string(),
+                ))
+            })?
+    }
+
+    async fn commit_batch(&self, batch: CommitBatch) -> DynResult<()> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(StoreCommand::CommitBatch {
+                batch,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| RuntimeError::Other("store writer task stopped".to_string()))?;
+        reply_rx
+            .await
+            .map_err(|_| -> Box<dyn std::error::Error + Send + Sync> {
+                Box::new(RuntimeError::Other(
+                    "store writer dropped commit reply".to_string(),
+                ))
+            })?
+    }
+}
+
+enum StoreCommand {
+    OpenEpoch {
+        run_id: i64,
+        market: MarketRef,
+        epoch_seq: i64,
+        started_at_ms: i64,
+        reply: oneshot::Sender<DynResult<i64>>,
+    },
+    CloseEpoch {
+        epoch_id: i64,
+        ended_at_ms: i64,
+        reason: String,
+        reply: oneshot::Sender<DynResult<()>>,
+    },
+    CommitBatch {
+        batch: CommitBatch,
+        reply: oneshot::Sender<DynResult<()>>,
+    },
 }
 
 #[derive(Clone, Debug, Default)]

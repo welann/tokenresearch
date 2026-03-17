@@ -1,19 +1,25 @@
 mod common;
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicI64, AtomicUsize, Ordering},
+};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use rust_decimal::Decimal;
 use serde_json::Value;
 use tempfile::tempdir;
 use tokenresearch::adapters::{BinanceAdapter, VenueAdapter};
-use tokenresearch::model::MarketRef;
+use tokenresearch::model::{
+    EventKind, MarketRef, NormalizedBookEvent, PriceLevel, SequenceRange, Venue,
+};
 use tokenresearch::query::QueryStore;
 use tokenresearch::runtime::{CollectorRuntime, RuntimeConfig};
 use tokenresearch::storage::SqliteBookStore;
-use tokenresearch::sync::BinanceBookSync;
-use tokenresearch::traits::{Clock, DynResult, RestClient};
+use tokenresearch::sync::{BinanceBookSync, GenericBookSync};
+use tokenresearch::traits::{BookStore, Clock, CommitBatch, DynResult, RestClient};
 
 #[derive(Clone, Default)]
 struct FakeClock {
@@ -36,6 +42,71 @@ impl Clock for FakeClock {
 struct FakeRest {
     responses: Arc<HashMap<String, String>>,
     transient_failures: Arc<Mutex<HashMap<String, usize>>>,
+}
+
+#[derive(Default)]
+struct RecordingStore {
+    next_epoch_id: AtomicI64,
+    active_commits: AtomicUsize,
+    max_concurrent_commits: AtomicUsize,
+    committed_batches: AtomicUsize,
+}
+
+#[async_trait]
+impl BookStore for RecordingStore {
+    async fn init(&self) -> DynResult<()> {
+        Ok(())
+    }
+
+    async fn upsert_markets(&self, _markets: &[tokenresearch::NormalizedMarket]) -> DynResult<()> {
+        Ok(())
+    }
+
+    async fn start_run(&self, _started_at_ms: i64) -> DynResult<i64> {
+        Ok(1)
+    }
+
+    async fn open_epoch(
+        &self,
+        _run_id: i64,
+        _market: &MarketRef,
+        _epoch_seq: i64,
+        _started_at_ms: i64,
+    ) -> DynResult<i64> {
+        Ok(self.next_epoch_id.fetch_add(1, Ordering::SeqCst) + 1)
+    }
+
+    async fn close_epoch(&self, _epoch_id: i64, _ended_at_ms: i64, _reason: &str) -> DynResult<()> {
+        Ok(())
+    }
+
+    async fn load_checkpoint(
+        &self,
+        _market: &MarketRef,
+    ) -> DynResult<Option<tokenresearch::CollectorCheckpoint>> {
+        Ok(None)
+    }
+
+    async fn commit_batch(&self, _batch: CommitBatch) -> DynResult<()> {
+        let active = self.active_commits.fetch_add(1, Ordering::SeqCst) + 1;
+        loop {
+            let current = self.max_concurrent_commits.load(Ordering::SeqCst);
+            if active <= current {
+                break;
+            }
+            if self
+                .max_concurrent_commits
+                .compare_exchange(current, active, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        self.committed_batches.fetch_add(1, Ordering::SeqCst);
+        self.active_commits.fetch_sub(1, Ordering::SeqCst);
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -173,4 +244,68 @@ async fn discovery_retries_after_transient_rest_failure() {
         .expect("discovery should recover");
     assert_eq!(markets.len(), 2);
     assert_eq!(sleeps.lock().expect("lock").len(), 1);
+}
+
+#[tokio::test]
+async fn runtime_serializes_commit_batches_through_single_writer() {
+    let store = Arc::new(RecordingStore::default());
+    let clock = Arc::new(FakeClock {
+        now_ms: 10_000,
+        sleeps: Arc::new(Mutex::new(Vec::new())),
+    });
+    let runtime = CollectorRuntime::new(
+        store.clone(),
+        clock,
+        RuntimeConfig {
+            snapshot_every_events: 1000,
+            snapshot_every_ms: i64::MAX,
+            ..RuntimeConfig::default()
+        },
+    );
+    let run_id = runtime.bootstrap_run().await.expect("run");
+
+    let mut tasks = Vec::new();
+    for index in 0..6 {
+        let runtime = runtime.clone();
+        let market = MarketRef::new(Venue::Hyperliquid, format!("MKT{index}"));
+        tasks.push(tokio::spawn(async move {
+            let mut session = runtime
+                .open_market_session(run_id, &market, 1)
+                .await
+                .expect("session");
+            let mut sync = GenericBookSync::new(market.clone());
+            let outcome = sync.apply(NormalizedBookEvent {
+                market: market.clone(),
+                kind: EventKind::Image,
+                exchange_ts_ms: Some(10_000),
+                received_ts_ms: 10_000 + index,
+                sequence: Some(SequenceRange {
+                    start: 1,
+                    end: 1,
+                    previous_end: None,
+                    offset: None,
+                }),
+                bids: vec![PriceLevel::new(
+                    Decimal::new(1000 + index as i64, 1),
+                    Decimal::ONE,
+                )],
+                asks: vec![PriceLevel::new(
+                    Decimal::new(1001 + index as i64, 1),
+                    Decimal::ONE,
+                )],
+                raw_payload: serde_json::json!({"index": index}),
+            });
+            runtime
+                .apply_generic_outcome(&mut session, &sync, outcome)
+                .await
+                .expect("persist");
+        }));
+    }
+
+    for task in tasks {
+        task.await.expect("join");
+    }
+
+    assert_eq!(store.committed_batches.load(Ordering::SeqCst), 6);
+    assert_eq!(store.max_concurrent_commits.load(Ordering::SeqCst), 1);
 }
