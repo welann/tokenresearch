@@ -13,7 +13,8 @@ use serde_json::Value;
 use tempfile::tempdir;
 use tokenresearch::adapters::{BinanceAdapter, VenueAdapter};
 use tokenresearch::model::{
-    EventKind, MarketRef, NormalizedBookEvent, PriceLevel, SequenceRange, Venue,
+    EventKind, MarketRef, MarketStatus, MarketType, NormalizedBookEvent, NormalizedMarket,
+    PriceLevel, SequenceRange, Venue,
 };
 use tokenresearch::query::QueryStore;
 use tokenresearch::runtime::{CollectorRuntime, RuntimeConfig};
@@ -60,6 +61,13 @@ impl BookStore for RecordingStore {
 
     async fn upsert_markets(&self, _markets: &[tokenresearch::NormalizedMarket]) -> DynResult<()> {
         Ok(())
+    }
+
+    async fn load_markets(
+        &self,
+        _venue: Option<Venue>,
+    ) -> DynResult<Vec<tokenresearch::NormalizedMarket>> {
+        Ok(Vec::new())
     }
 
     async fn start_run(&self, _started_at_ms: i64) -> DynResult<i64> {
@@ -244,6 +252,56 @@ async fn discovery_retries_after_transient_rest_failure() {
         .expect("discovery should recover");
     assert_eq!(markets.len(), 2);
     assert_eq!(sleeps.lock().expect("lock").len(), 1);
+}
+
+#[tokio::test]
+async fn discovery_uses_cached_markets_before_remote() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("collector.sqlite");
+    let store = Arc::new(SqliteBookStore::connect(&db_path).await.expect("connect"));
+    store.init().await.expect("init");
+    store
+        .upsert_markets(&[NormalizedMarket {
+            market: MarketRef::new(Venue::Binance, "BTCUSDT"),
+            venue_market_id: "BTCUSDT".to_string(),
+            base_asset: "BTC".to_string(),
+            quote_asset: "USDT".to_string(),
+            market_type: MarketType::Perpetual,
+            status: MarketStatus::Active,
+            price_decimals: 1,
+            size_decimals: 3,
+        }])
+        .await
+        .expect("seed markets");
+
+    let sleeps = Arc::new(Mutex::new(Vec::new()));
+    let clock = Arc::new(FakeClock {
+        now_ms: 10_000,
+        sleeps: sleeps.clone(),
+    });
+    let runtime = CollectorRuntime::new(
+        store,
+        clock,
+        RuntimeConfig {
+            database_path: db_path.display().to_string(),
+            discovery_max_attempts: 3,
+            ..RuntimeConfig::default()
+        },
+    );
+    runtime.bootstrap_run().await.expect("run");
+
+    let rest = FakeRest {
+        responses: Arc::new(HashMap::new()),
+        transient_failures: Arc::new(Mutex::new(HashMap::new())),
+    };
+
+    let markets = runtime
+        .discover_markets_with_retry(&rest, &BinanceAdapter)
+        .await
+        .expect("discovery should use cache");
+    assert_eq!(markets.len(), 1);
+    assert_eq!(markets[0].market.symbol, "BTCUSDT");
+    assert!(sleeps.lock().expect("lock").is_empty());
 }
 
 #[tokio::test]

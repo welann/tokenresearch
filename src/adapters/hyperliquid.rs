@@ -131,10 +131,11 @@ impl VenueAdapter for HyperliquidAdapter {
         received_ts_ms: i64,
     ) -> Result<Option<NormalizedBookEvent>, AdapterError> {
         let parsed: Value = serde_json::from_str(raw)?;
-        if parsed.get("channel").and_then(Value::as_str) == Some("subscriptionResponse") {
+        let channel = parsed.get("channel").and_then(Value::as_str);
+        if matches!(channel, Some("subscriptionResponse" | "pong")) {
             return Ok(None);
         }
-        if parsed.get("channel").and_then(Value::as_str) == Some("pong") {
+        if !matches!(channel, Some("l2Book") | None) {
             return Ok(None);
         }
 

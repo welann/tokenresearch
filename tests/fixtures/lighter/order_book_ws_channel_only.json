@@ -1,0 +1,16 @@
+{
+  "type": "update/order_book",
+  "channel": "order_book:57",
+  "timestamp": 1710000000789,
+  "order_book": {
+    "nonce": 10,
+    "bids": [
+      {"price": "0.27920", "size": "125.0"},
+      {"price": "0.27910", "size": "80.0"}
+    ],
+    "asks": [
+      {"price": "0.27930", "size": "95.0"},
+      {"price": "0.27940", "size": "120.0"}
+    ]
+  }
+}

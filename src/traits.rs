@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::model::{
     BookView, CollectorCheckpoint, GapWindow, MarketRef, NormalizedBookEvent, NormalizedMarket,
+    Venue,
 };
 
 pub type DynError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -56,6 +57,7 @@ pub trait Clock: Send + Sync {
 pub trait BookStore: Send + Sync {
     async fn init(&self) -> DynResult<()>;
     async fn upsert_markets(&self, markets: &[NormalizedMarket]) -> DynResult<()>;
+    async fn load_markets(&self, venue: Option<Venue>) -> DynResult<Vec<NormalizedMarket>>;
     async fn start_run(&self, started_at_ms: i64) -> DynResult<i64>;
     async fn open_epoch(
         &self,

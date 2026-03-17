@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,7 +12,7 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use crate::adapters::{
     BinanceAdapter, HttpMethod, HyperliquidAdapter, LighterAdapter, VenueAdapter,
 };
-use crate::model::{BookView, GapWindow, MarketRef, NormalizedMarket};
+use crate::model::{BookView, GapWindow, MarketRef, NormalizedBookEvent, NormalizedMarket};
 use crate::sync::{BinanceBookSync, GenericBookSync, SyncOutcome};
 use crate::traits::{
     BookStore, Clock, CommitBatch, DynResult, RestClient, SnapshotRecord, WsClient, WsConnection,
@@ -132,6 +132,22 @@ where
         rest: &dyn RestClient,
         adapter: &A,
     ) -> DynResult<Vec<NormalizedMarket>> {
+        let cached_markets = self
+            .store
+            .load_markets(Some(adapter.venue()))
+            .await?
+            .into_iter()
+            .filter(|market| market.status == crate::model::MarketStatus::Active)
+            .collect::<Vec<_>>();
+        if !cached_markets.is_empty() {
+            tracing::info!(
+                venue = %adapter.venue().as_str(),
+                count = cached_markets.len(),
+                "using cached market metadata"
+            );
+            return Ok(cached_markets);
+        }
+
         let max_attempts = self.config.discovery_max_attempts.max(1);
         let mut attempt = 0usize;
         let mut backoff_ms = self.config.reconnect_backoff_ms.max(1);
@@ -397,6 +413,11 @@ where
             };
             backoff_ms = self.config.reconnect_backoff_ms;
 
+            let market_by_symbol = markets
+                .iter()
+                .cloned()
+                .map(|market| (market.market.symbol.clone(), market))
+                .collect::<HashMap<_, _>>();
             let mut states = HashMap::new();
             for market in &markets {
                 let session = self.open_market_session(run_id, &market.market, 1).await?;
@@ -406,46 +427,56 @@ where
                 );
             }
 
-            let (snapshot_tx, mut snapshot_rx) = mpsc::unbounded_channel();
-            for market in markets.iter().cloned() {
-                let runtime = self.owned_clone();
-                let rest = rest.clone();
-                let tx = snapshot_tx.clone();
-                tokio::spawn(async move {
-                    if let Some(request) = BinanceAdapter.snapshot_request(&market) {
-                        let body = match request.method {
-                            HttpMethod::Get => rest.get_text(&request.url).await,
-                            HttpMethod::Post => {
-                                rest.post_json_text(
-                                    &request.url,
-                                    request.body.as_ref().unwrap_or(&Value::Null),
-                                )
-                                .await
-                            }
-                        };
-                        if let Ok(body) = body {
-                            let now_ms = runtime.clock.now_ms();
-                            match BinanceAdapter.parse_snapshot(&market, &body, now_ms) {
-                                Ok(snapshot) => {
-                                    let _ = tx.send((market.market.symbol.clone(), snapshot));
-                                }
-                                Err(error) => {
-                                    tracing::warn!(?error, market = %market.market.symbol, "binance snapshot parse failed");
-                                }
-                            }
-                        }
-                    }
-                });
-            }
-            drop(snapshot_tx);
+            let (snapshot_request_tx, mut snapshot_request_rx) =
+                mpsc::unbounded_channel::<(NormalizedMarket, i64)>();
+            let (snapshot_result_tx, mut snapshot_result_rx) =
+                mpsc::unbounded_channel::<(String, DynResult<NormalizedBookEvent>)>();
+            let rest_for_snapshots = rest.clone();
+            tokio::spawn(async move {
+                while let Some((market, received_ts_ms)) = snapshot_request_rx.recv().await {
+                    let result =
+                        fetch_binance_snapshot(&rest_for_snapshots, &market, received_ts_ms).await;
+                    let _ = snapshot_result_tx.send((market.market.symbol.clone(), result));
+                }
+            });
+            let mut snapshot_in_flight = HashSet::new();
+            let mut snapshot_retry_after_ms = HashMap::<String, i64>::new();
+            let mut snapshot_backoff_ms = HashMap::<String, u64>::new();
 
             loop {
                 tokio::select! {
-                    maybe_snapshot = snapshot_rx.recv() => {
-                        if let Some((symbol, snapshot)) = maybe_snapshot {
-                            if let Some((session, sync)) = states.get_mut(&symbol) {
-                                let outcome = sync.on_snapshot(snapshot);
-                                self.apply_binance_outcome(session, sync, outcome).await?;
+                    maybe_snapshot = snapshot_result_rx.recv() => {
+                        if let Some((symbol, result)) = maybe_snapshot {
+                            snapshot_in_flight.remove(&symbol);
+                            match result {
+                                Ok(snapshot) => {
+                                    snapshot_retry_after_ms.remove(&symbol);
+                                    snapshot_backoff_ms.remove(&symbol);
+                                    if let Some((session, sync)) = states.get_mut(&symbol) {
+                                        let outcome = sync.on_snapshot(snapshot);
+                                        self.apply_binance_outcome(session, sync, outcome).await?;
+                                    }
+                                }
+                                Err(error) => {
+                                    let next_backoff = snapshot_backoff_ms
+                                        .get(&symbol)
+                                        .copied()
+                                        .unwrap_or_else(|| self.config.reconnect_backoff_ms.max(1));
+                                    snapshot_retry_after_ms.insert(
+                                        symbol.clone(),
+                                        self.clock.now_ms() + next_backoff as i64,
+                                    );
+                                    snapshot_backoff_ms.insert(
+                                        symbol.clone(),
+                                        (next_backoff * 2).min(self.config.reconnect_backoff_cap_ms),
+                                    );
+                                    tracing::warn!(
+                                        error = %error,
+                                        market = %symbol,
+                                        retry_after_ms = next_backoff,
+                                        "binance snapshot fetch failed"
+                                    );
+                                }
                             }
                         }
                     }
@@ -454,9 +485,29 @@ where
                             Ok(Some(raw)) => {
                                 match adapter.parse_ws_message(&raw, self.clock.now_ms()) {
                                     Ok(Some(event)) => {
-                                        if let Some((session, sync)) = states.get_mut(&event.market.symbol) {
+                                        let symbol = event.market.symbol.clone();
+                                        let received_ts_ms = event.received_ts_ms;
+                                        if let Some((session, sync)) = states.get_mut(&symbol) {
                                             let outcome = sync.on_delta(event);
+                                            let should_request_snapshot = outcome.needs_resync
+                                                && outcome.accepted_events.is_empty();
                                             self.apply_binance_outcome(session, sync, outcome).await?;
+                                            let snapshot_retry_ready = snapshot_retry_after_ms
+                                                .get(&symbol)
+                                                .is_none_or(|retry_at_ms| self.clock.now_ms() >= *retry_at_ms);
+                                            if should_request_snapshot
+                                                && snapshot_retry_ready
+                                                && snapshot_in_flight.insert(symbol.clone())
+                                            {
+                                                if let Some(market) = market_by_symbol.get(&symbol) {
+                                                    if snapshot_request_tx.send((market.clone(), received_ts_ms)).is_err() {
+                                                        snapshot_in_flight.remove(&symbol);
+                                                        tracing::warn!(market = %symbol, "binance snapshot worker unavailable");
+                                                    }
+                                                } else {
+                                                    snapshot_in_flight.remove(&symbol);
+                                                }
+                                            }
                                         }
                                     }
                                     Ok(None) => {}
@@ -593,6 +644,26 @@ where
 trait DisconnectMarket {
     fn market(&self) -> &MarketRef;
     fn reset(&mut self);
+}
+
+async fn fetch_binance_snapshot<R: RestClient>(
+    rest: &R,
+    market: &NormalizedMarket,
+    received_ts_ms: i64,
+) -> DynResult<NormalizedBookEvent> {
+    let request = BinanceAdapter
+        .snapshot_request(market)
+        .ok_or_else(|| RuntimeError::Other("binance snapshot request missing".to_string()))?;
+    let body = match request.method {
+        HttpMethod::Get => rest.get_text(&request.url).await?,
+        HttpMethod::Post => {
+            rest.post_json_text(&request.url, request.body.as_ref().unwrap_or(&Value::Null))
+                .await?
+        }
+    };
+    BinanceAdapter
+        .parse_snapshot(market, &body, received_ts_ms)
+        .map_err(|error| RuntimeError::Other(error.to_string()).into())
 }
 
 impl DisconnectMarket for BinanceBookSync {

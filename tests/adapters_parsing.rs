@@ -46,6 +46,19 @@ fn hyperliquid_adapter_parses_meta_and_l2_book_images() {
     assert_eq!(image.kind, EventKind::Image);
     assert_eq!(image.market.symbol, "BTC");
     assert_eq!(image.bids.len(), 2);
+
+    let subscription = adapter
+        .parse_ws_message(
+            &common::fixture("hyperliquid/subscription_response.json"),
+            3001,
+        )
+        .expect("parse subscription response");
+    assert!(subscription.is_none());
+
+    let other = adapter
+        .parse_ws_message(&common::fixture("hyperliquid/other_channel.json"), 3002)
+        .expect("parse unrelated channel");
+    assert!(other.is_none());
 }
 
 #[test]
@@ -64,4 +77,14 @@ fn lighter_adapter_parses_discovery_and_delta_messages() {
     assert_eq!(event.kind, EventKind::Delta);
     assert_eq!(event.market.symbol, "PROVE");
     assert_eq!(event.sequence.expect("sequence").end, 10);
+
+    let channel_only = adapter
+        .parse_ws_message(
+            &common::fixture("lighter/order_book_ws_channel_only.json"),
+            4001,
+        )
+        .expect("parse channel-only delta")
+        .expect("event");
+    assert_eq!(channel_only.market.symbol, "PROVE");
+    assert_eq!(channel_only.sequence.expect("sequence").end, 10);
 }

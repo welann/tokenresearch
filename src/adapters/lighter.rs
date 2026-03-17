@@ -30,6 +30,26 @@ impl Clone for LighterAdapter {
 }
 
 impl LighterAdapter {
+    fn channel_market_id(value: Option<&Value>) -> Option<String> {
+        value.and_then(Value::as_str).and_then(|channel| {
+            channel
+                .rsplit_once('/')
+                .map(|(_, suffix)| suffix.to_string())
+                .or_else(|| {
+                    channel
+                        .rsplit_once(':')
+                        .map(|(_, suffix)| suffix.to_string())
+                })
+        })
+    }
+
+    fn market_id_from_value(value: Option<&Value>) -> Option<String> {
+        value
+            .and_then(Value::as_i64)
+            .map(|value| value.to_string())
+            .or_else(|| value.and_then(Value::as_str).map(ToString::to_string))
+    }
+
     fn parse_level(entry: &Value) -> Result<PriceLevel, AdapterError> {
         let price = entry
             .get("price")
@@ -151,10 +171,19 @@ impl VenueAdapter for LighterAdapter {
         received_ts_ms: i64,
     ) -> Result<Option<NormalizedBookEvent>, AdapterError> {
         let parsed: Value = serde_json::from_str(raw)?;
-        if matches!(
-            parsed.get("type").and_then(Value::as_str),
-            Some("subscribed" | "connected" | "pong")
-        ) {
+        let message_type = parsed.get("type").and_then(Value::as_str);
+        let channel = parsed.get("channel");
+        if matches!(message_type, Some("subscribed" | "connected" | "pong")) {
+            return Ok(None);
+        }
+        if let Some(channel_name) = channel.and_then(Value::as_str) {
+            if !channel_name.starts_with("order_book") {
+                return Ok(None);
+            }
+        } else if !matches!(message_type, Some("update/order_book"))
+            && parsed.get("order_book").is_none()
+            && parsed.get("data").is_none()
+        {
             return Ok(None);
         }
 
@@ -164,22 +193,28 @@ impl VenueAdapter for LighterAdapter {
             .unwrap_or(&parsed);
         let market_id = payload
             .get("market_id")
-            .and_then(Value::as_i64)
-            .map(|value| value.to_string())
+            .or_else(|| payload.get("marketId"))
+            .or_else(|| parsed.get("market_id"))
+            .or_else(|| parsed.get("marketId"))
             .or_else(|| {
                 parsed
-                    .get("channel")
-                    .and_then(Value::as_str)
-                    .and_then(|channel| {
-                        channel
-                            .rsplit_once('/')
-                            .map(|(_, suffix)| suffix.to_string())
-                            .or_else(|| {
-                                channel
-                                    .rsplit_once(':')
-                                    .map(|(_, suffix)| suffix.to_string())
-                            })
-                    })
+                    .get("subscription")
+                    .and_then(|value| value.get("market_id"))
+            })
+            .or_else(|| {
+                parsed
+                    .get("subscription")
+                    .and_then(|value| value.get("marketId"))
+            })
+            .and_then(|value| Self::market_id_from_value(Some(value)))
+            .or_else(|| {
+                Self::channel_market_id(parsed.get("channel")).or_else(|| {
+                    Self::channel_market_id(
+                        parsed
+                            .get("subscription")
+                            .and_then(|value| value.get("channel")),
+                    )
+                })
             })
             .ok_or(AdapterError::MissingField("market_id"))?;
 

@@ -218,6 +218,54 @@ impl BookStore for SqliteBookStore {
         Ok(())
     }
 
+    async fn load_markets(&self, venue: Option<Venue>) -> DynResult<Vec<NormalizedMarket>> {
+        let rows = if let Some(venue) = venue {
+            sqlx::query(
+                "SELECT venue, symbol, venue_market_id, base_asset, quote_asset,
+                        market_type, status, price_decimals, size_decimals
+                 FROM markets
+                 WHERE venue = ?
+                 ORDER BY symbol",
+            )
+            .bind(venue.as_str())
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                "SELECT venue, symbol, venue_market_id, base_asset, quote_asset,
+                        market_type, status, price_decimals, size_decimals
+                 FROM markets
+                 ORDER BY venue, symbol",
+            )
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let venue = row.get::<String, _>("venue");
+                let symbol = row.get::<String, _>("symbol");
+                NormalizedMarket {
+                    market: parse_market_ref(&venue, &symbol),
+                    venue_market_id: row.get("venue_market_id"),
+                    base_asset: row.get("base_asset"),
+                    quote_asset: row.get("quote_asset"),
+                    market_type: match row.get::<String, _>("market_type").as_str() {
+                        "perpetual" => MarketType::Perpetual,
+                        _ => MarketType::Perpetual,
+                    },
+                    status: match row.get::<String, _>("status").as_str() {
+                        "active" => MarketStatus::Active,
+                        _ => MarketStatus::Inactive,
+                    },
+                    price_decimals: row.get::<i64, _>("price_decimals") as u32,
+                    size_decimals: row.get::<i64, _>("size_decimals") as u32,
+                }
+            })
+            .collect())
+    }
+
     async fn start_run(&self, started_at_ms: i64) -> DynResult<i64> {
         let result =
             sqlx::query("INSERT INTO collector_runs (started_at_ms, status) VALUES (?, 'running')")
