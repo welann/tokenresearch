@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use thiserror::Error;
 
@@ -14,7 +15,7 @@ pub struct TimeRange {
     pub end_ms: Option<i64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotMeta {
     pub id: i64,
     pub market: MarketRef,

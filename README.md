@@ -27,6 +27,7 @@
   - `gaps`
   - `collector_state`
   - `book_at`
+- 提供独立查询 CLI：`query`
 - 提供离线测试和在线 smoke 测试。
 
 ## 快速开始
@@ -74,7 +75,63 @@ cargo run --release -- config.toml.example
 
 ## 查询接口
 
-当前查询接口只提供 Rust 库 API，不提供 HTTP 服务或独立 CLI。
+当前查询能力提供两种使用方式：
+
+- Rust 库 API
+- 独立 CLI 二进制：`query`
+
+### CLI 用法
+
+列出市场：
+
+```bash
+cargo run --bin query -- --db tokenresearch.sqlite markets
+```
+
+查询最新盘口：
+
+```bash
+cargo run --bin query -- \
+  --db tokenresearch.sqlite \
+  latest \
+  --venue hyperliquid \
+  --symbol BTC \
+  --depth 10
+```
+
+查询最新盘口并输出 JSON：
+
+```bash
+cargo run --bin query -- \
+  --db tokenresearch.sqlite \
+  --json \
+  latest \
+  --venue binance \
+  --symbol BTCUSDT \
+  --depth 10
+```
+
+查询某个时间点的盘口：
+
+```bash
+cargo run --bin query -- \
+  --db tokenresearch.sqlite \
+  book-at \
+  --venue binance \
+  --symbol BTCUSDT \
+  --ts-ms 1710000000000 \
+  --depth 10
+```
+
+查询 gap：
+
+```bash
+cargo run --bin query -- \
+  --db tokenresearch.sqlite \
+  gaps \
+  --venue binance \
+  --symbol BTCUSDT
+```
 
 最小示例：
 
@@ -141,7 +198,7 @@ flowchart LR
 
 - Binance Futures 在某些网络出口下可能返回 `418`，这是交易所侧的访问限制，不是本地解析错误。
 - 某些网络环境可能对 `wss` 握手不稳定，表现为 `tls handshake eof`。
-- 当前没有内置 HTTP API 或查询 CLI，查询主要通过 Rust API 使用。
+- 当前没有内置 HTTP API。
 - Binance 的完整本地订单簿仍然需要按官方要求保留 REST snapshot 作为重同步锚点，不能纯靠 `wss` 实现完整簿。
 
 ## 开发约束

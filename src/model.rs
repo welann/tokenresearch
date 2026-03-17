@@ -1,3 +1,6 @@
+use std::fmt;
+use std::str::FromStr;
+
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -16,6 +19,25 @@ impl Venue {
             Self::Binance => "binance",
             Self::Hyperliquid => "hyperliquid",
             Self::Lighter => "lighter",
+        }
+    }
+}
+
+impl fmt::Display for Venue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for Venue {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "binance" => Ok(Self::Binance),
+            "hyperliquid" => Ok(Self::Hyperliquid),
+            "lighter" => Ok(Self::Lighter),
+            other => Err(format!("unsupported venue: {other}")),
         }
     }
 }

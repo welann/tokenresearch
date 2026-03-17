@@ -1,6 +1,6 @@
 # 存储与查询说明
 
-本文描述 SQLite schema、物化策略以及当前的 Rust 查询接口。
+本文描述 SQLite schema、物化策略以及当前的 Rust 查询接口与 CLI。
 
 ## 存储结构
 
@@ -84,6 +84,51 @@ flowchart LR
 - `collector_state(market)`
 - `book_at(market, ts_ms, depth)`
 
+## 查询 CLI
+
+当前仓库还提供独立查询二进制：
+
+- `cargo run --bin query -- ...`
+
+支持的子命令：
+
+- `markets`
+- `latest`
+- `book-at`
+- `events`
+- `snapshots`
+- `gaps`
+- `health`
+
+所有子命令都支持：
+
+- `--db <sqlite_path>`
+- `--json`
+
+示例：
+
+```bash
+cargo run --bin query -- --db tokenresearch.sqlite markets
+```
+
+```bash
+cargo run --bin query -- \
+  --db tokenresearch.sqlite \
+  --json \
+  latest \
+  --venue lighter \
+  --symbol PROVE \
+  --depth 5
+```
+
+```bash
+cargo run --bin query -- \
+  --db tokenresearch.sqlite \
+  health \
+  --venue hyperliquid \
+  --symbol BTC
+```
+
 ## `book_at` 的语义
 
 `book_at` 的实现逻辑：
@@ -119,4 +164,4 @@ flowchart TD
 
 - 当前没有自动历史归档策略
 - 当前没有 SQL migration versioning 机制，schema 直接通过 `CREATE TABLE IF NOT EXISTS` 初始化
-- 当前没有独立查询 CLI，查询主要通过 Rust API 和 SQLite 视图完成
+- 当前没有 HTTP 查询服务，查询主要通过 Rust API、CLI 和 SQLite 视图完成
