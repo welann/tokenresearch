@@ -49,10 +49,21 @@ cargo test --test online_smoke -- --ignored --test-threads=1 --nocapture
 使用示例配置：
 
 ```bash
-cargo run --release -- config.toml.example
+cargo run --release --bin tokenresearch -- config.toml.example
 ```
 
 如果没有提供配置文件，程序会尝试读取 `config.toml`；若不存在，则退回默认配置。
+
+由于仓库现在包含多个二进制：
+
+- `tokenresearch`
+- `query`
+
+`Cargo.toml` 已经把默认运行入口设成了 `tokenresearch`，所以这条命令同样可用：
+
+```bash
+cargo run --release -- config.toml.example
+```
 
 ### 3. 默认输出
 
