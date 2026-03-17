@@ -93,13 +93,22 @@ cargo run --release -- config.toml.example
 
 ### CLI 用法
 
-列出市场：
+`markets`，列出全部市场：
 
 ```bash
 cargo run --bin query -- --db tokenresearch.sqlite markets
 ```
 
-查询最新盘口：
+`markets`，只看某个交易所：
+
+```bash
+cargo run --bin query -- \
+  --db tokenresearch.sqlite \
+  markets \
+  --venue hyperliquid
+```
+
+`latest`，查询最新盘口：
 
 ```bash
 cargo run --bin query -- \
@@ -110,7 +119,7 @@ cargo run --bin query -- \
   --depth 10
 ```
 
-查询最新盘口并输出 JSON：
+`latest`，查询最新盘口并输出 JSON：
 
 ```bash
 cargo run --bin query -- \
@@ -122,7 +131,7 @@ cargo run --bin query -- \
   --depth 10
 ```
 
-查询某个时间点的盘口：
+`book-at`，查询某个时间点的盘口：
 
 ```bash
 cargo run --bin query -- \
@@ -134,7 +143,31 @@ cargo run --bin query -- \
   --depth 10
 ```
 
-查询 gap：
+`events`，查询事件流水：
+
+```bash
+cargo run --bin query -- \
+  --db tokenresearch.sqlite \
+  events \
+  --venue binance \
+  --symbol BTCUSDT \
+  --start-ms 1710000000000 \
+  --end-ms 1710000600000 \
+  --limit 20
+```
+
+`snapshots`，查询快照列表：
+
+```bash
+cargo run --bin query -- \
+  --db tokenresearch.sqlite \
+  snapshots \
+  --venue lighter \
+  --symbol PROVE \
+  --limit 10
+```
+
+`gaps`，查询 gap：
 
 ```bash
 cargo run --bin query -- \
@@ -142,6 +175,16 @@ cargo run --bin query -- \
   gaps \
   --venue binance \
   --symbol BTCUSDT
+```
+
+`health`，查询 market 健康状态：
+
+```bash
+cargo run --bin query -- \
+  --db tokenresearch.sqlite \
+  health \
+  --venue hyperliquid \
+  --symbol BTC
 ```
 
 最小示例：

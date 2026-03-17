@@ -105,11 +105,22 @@ flowchart LR
 - `--db <sqlite_path>`
 - `--json`
 
-示例：
+`markets`，列出全部市场：
 
 ```bash
 cargo run --bin query -- --db tokenresearch.sqlite markets
 ```
+
+`markets`，只看单个交易所：
+
+```bash
+cargo run --bin query -- \
+  --db tokenresearch.sqlite \
+  markets \
+  --venue hyperliquid
+```
+
+`latest`，查询最新盘口：
 
 ```bash
 cargo run --bin query -- \
@@ -120,6 +131,54 @@ cargo run --bin query -- \
   --symbol PROVE \
   --depth 5
 ```
+
+`book-at`，查询某个时间点的盘口：
+
+```bash
+cargo run --bin query -- \
+  --db tokenresearch.sqlite \
+  book-at \
+  --venue binance \
+  --symbol BTCUSDT \
+  --ts-ms 1710000000000 \
+  --depth 10
+```
+
+`events`，查询事件流水：
+
+```bash
+cargo run --bin query -- \
+  --db tokenresearch.sqlite \
+  events \
+  --venue binance \
+  --symbol BTCUSDT \
+  --start-ms 1710000000000 \
+  --end-ms 1710000600000 \
+  --limit 20
+```
+
+`snapshots`，查询快照：
+
+```bash
+cargo run --bin query -- \
+  --db tokenresearch.sqlite \
+  snapshots \
+  --venue lighter \
+  --symbol PROVE \
+  --limit 10
+```
+
+`gaps`，查询缺口：
+
+```bash
+cargo run --bin query -- \
+  --db tokenresearch.sqlite \
+  gaps \
+  --venue binance \
+  --symbol BTCUSDT
+```
+
+`health`，查询 market 健康状态：
 
 ```bash
 cargo run --bin query -- \
