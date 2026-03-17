@@ -1,0 +1,29 @@
+{
+  "code": 200,
+  "order_books": [
+    {
+      "symbol": "PROVE",
+      "market_id": 57,
+      "market_type": "perp",
+      "status": "active",
+      "supported_size_decimals": 1,
+      "supported_price_decimals": 5
+    },
+    {
+      "symbol": "AXS",
+      "market_id": 131,
+      "market_type": "perp",
+      "status": "active",
+      "supported_size_decimals": 2,
+      "supported_price_decimals": 4
+    },
+    {
+      "symbol": "LDO/USDC",
+      "market_id": 2054,
+      "market_type": "spot",
+      "status": "active",
+      "supported_size_decimals": 1,
+      "supported_price_decimals": 5
+    }
+  ]
+}

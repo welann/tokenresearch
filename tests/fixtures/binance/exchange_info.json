@@ -1,0 +1,58 @@
+{
+  "timezone": "UTC",
+  "serverTime": 1773748813892,
+  "futuresType": "U_MARGINED",
+  "symbols": [
+    {
+      "symbol": "BTCUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "baseAsset": "BTC",
+      "quoteAsset": "USDT",
+      "filters": [
+        {
+          "filterType": "PRICE_FILTER",
+          "tickSize": "0.10"
+        },
+        {
+          "filterType": "LOT_SIZE",
+          "stepSize": "0.001"
+        }
+      ]
+    },
+    {
+      "symbol": "ETHUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "baseAsset": "ETH",
+      "quoteAsset": "USDT",
+      "filters": [
+        {
+          "filterType": "PRICE_FILTER",
+          "tickSize": "0.01"
+        },
+        {
+          "filterType": "LOT_SIZE",
+          "stepSize": "0.001"
+        }
+      ]
+    },
+    {
+      "symbol": "BTCUSD_240329",
+      "contractType": "CURRENT_QUARTER",
+      "status": "TRADING",
+      "baseAsset": "BTC",
+      "quoteAsset": "USD",
+      "filters": [
+        {
+          "filterType": "PRICE_FILTER",
+          "tickSize": "0.10"
+        },
+        {
+          "filterType": "LOT_SIZE",
+          "stepSize": "0.001"
+        }
+      ]
+    }
+  ]
+}
