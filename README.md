@@ -105,6 +105,8 @@ cargo run --release -- config.toml.example
 
 价格示例配置见 [price_config.toml.example](/Users/welann/Documents/code/web3code/tokenresearch/price_config.toml.example)。
 
+价格数据库各张表和字段的详细说明见 [storage-query.md](/Users/welann/Documents/code/web3code/tokenresearch/docs/storage-query.md)。
+
 价格配置项：
 
 - `database_path`

@@ -2,6 +2,8 @@
 
 本文描述第三个模块 `pricecollector` 的结构、数据流、回补逻辑和查询语义。
 
+更细的价格表字段说明见 [storage-query.md](/Users/welann/Documents/code/web3code/tokenresearch/docs/storage-query.md)。
+
 ## 目标
 
 - 独立采集三家交易所永续市场价格

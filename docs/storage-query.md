@@ -67,6 +67,18 @@ flowchart LR
 
 价格数据库 schema 由 `src/price_storage.rs` 初始化，默认文件是 `token_prices.sqlite`。
 
+```mermaid
+flowchart LR
+    A["price_markets"] --> B["price_stream_epochs"]
+    A --> C["price_samples_1s"]
+    A --> D["price_candles_1m"]
+    B --> E["price_checkpoints"]
+    B --> F["price_gap_windows"]
+    C --> G["v_price_latest"]
+    E --> H["v_price_health"]
+    F --> I["v_price_gap_summary"]
+```
+
 ### 元数据与运行状态
 
 - `price_markets`
@@ -90,6 +102,226 @@ flowchart LR
 - `v_price_latest`
 - `v_price_health`
 - `v_price_gap_summary`
+
+## 价格表字段说明
+
+### `price_markets`
+
+一行代表一个“可查询的价格市场”。
+
+- `venue`
+  - 交易所名，目前是 `binance`、`hyperliquid`、`lighter`
+- `symbol`
+  - 本系统内部统一使用的市场符号
+  - Binance 例子：`BTCUSDT`
+  - Hyperliquid / Lighter 例子：`BTC`
+- `venue_market_id`
+  - 交易所原生市场标识
+  - Binance / Hyperliquid 通常和 `symbol` 一样
+  - Lighter 通常是数字 market id，例如 `57`
+- `token`
+  - 这个市场对应的基础 token 名称，用于 token 级查询
+- `quote_asset`
+  - 计价资产，目前常见是 `USDT` 或 `USDC`
+- `status`
+  - 市场状态，当前写入 `active` / `inactive`
+- `supports_trade_history`
+  - `1` 表示官方接口支持该市场的 `trade` 历史回补
+- `supports_reference_history`
+  - `1` 表示官方接口支持该市场的 `reference` 历史回补
+- `updated_at_ms`
+  - 这条市场元数据最近一次被 discovery 或 live fallback 更新的本地时间，毫秒时间戳
+
+### `price_runs`
+
+一行代表一次 `pricecollector` 进程运行周期。
+
+- `id`
+  - 本次运行的自增 id
+- `started_at_ms`
+  - 本次运行开始时间
+- `stopped_at_ms`
+  - 预留的结束时间，目前大多数情况下为空
+- `status`
+  - 运行状态，目前初始化时写 `running`
+
+### `price_stream_epochs`
+
+一行代表某个市场、某个价格口径的一段连续采集时期。
+
+- `id`
+  - epoch 主键
+- `run_id`
+  - 所属 `price_runs.id`
+- `venue`
+  - 交易所
+- `symbol`
+  - 市场符号
+- `price_kind`
+  - 价格口径，当前是 `trade` 或 `reference`
+- `epoch_seq`
+  - 同一 market + kind 在一次运行里的第几段连续流
+- `started_at_ms`
+  - 该 epoch 开始时间
+- `ended_at_ms`
+  - 该 epoch 结束时间
+- `reason`
+  - 结束原因；异常中断、重连、gap 修复时用于审计
+
+### `price_samples_1s`
+
+一行代表一个 `1s` 桶聚合后的实时价格样本，用于近实时查询。
+
+- `venue`
+  - 交易所
+- `symbol`
+  - 市场符号
+- `price_kind`
+  - `trade` / `reference`
+- `bucket_ts_ms`
+  - 这个 `1s` 样本桶的起始毫秒时间
+- `open_price`
+  - 这一秒内第一笔价格
+- `high_price`
+  - 这一秒内最高价格
+- `low_price`
+  - 这一秒内最低价格
+- `close_price`
+  - 这一秒内最后一笔价格
+- `sample_count`
+  - 这一秒内聚合了多少个 live tick
+- `first_exchange_ts_ms`
+  - 这一秒内第一笔 tick 的交易所时间
+- `last_exchange_ts_ms`
+  - 这一秒内最后一笔 tick 的交易所时间
+- `updated_at_ms`
+  - 这条 `1s` 样本最近一次落库时间
+
+### `price_candles_1m`
+
+一行代表一根 `1m` OHLCV candle，是长期保存的历史层。
+
+- `venue`
+  - 交易所
+- `symbol`
+  - 市场符号
+- `price_kind`
+  - `trade` / `reference`
+- `open_time_ms`
+  - 这根 candle 的开盘时间
+- `close_time_ms`
+  - 这根 candle 的收盘时间
+- `open_price`
+  - 开盘价
+- `high_price`
+  - 最高价
+- `low_price`
+  - 最低价
+- `close_price`
+  - 收盘价
+- `volume`
+  - 成交量；对 `reference` 口径通常没有真实成交量，因此可能为 `0`
+- `trade_count`
+  - 该分钟内交易笔数；如果交易所没提供就为空
+- `source`
+  - candle 来源，当前常见是：
+  - `live`：由 websocket tick 滚动聚合出来
+  - `backfill`：由历史 REST API 回补写入
+- `updated_at_ms`
+  - 这根 candle 最近一次写入时间
+
+### `price_checkpoints`
+
+一行代表某个 market + kind 的最新恢复位置。
+
+- `venue`
+  - 交易所
+- `symbol`
+  - 市场符号
+- `price_kind`
+  - `trade` / `reference`
+- `epoch_id`
+  - 当前关联的 `price_stream_epochs.id`
+- `last_live_bucket_ms`
+  - 最近一个成功写入的 `1s` 样本桶时间
+- `last_candle_open_ms`
+  - 最近一个成功写入的 `1m` candle 开盘时间
+- `last_backfill_open_ms`
+  - 最近一个通过 backfill 成功写入的 `1m` candle 开盘时间
+- `last_exchange_ts_ms`
+  - 最近一条 live tick 的交易所时间
+- `updated_at_ms`
+  - checkpoint 最近更新时间
+- `status`
+  - 当前状态，常见值：
+  - `live`
+  - `backfilled`
+
+### `price_gap_windows`
+
+一行代表一段不可确认完整的数据缺口。
+
+- `id`
+  - gap 主键
+- `venue`
+  - 交易所
+- `symbol`
+  - 市场符号
+- `price_kind`
+  - `trade` / `reference`
+- `resolution`
+  - gap 所属粒度，当前常见是 `1m`
+- `started_at_ms`
+  - 缺口开始时间
+- `ended_at_ms`
+  - 缺口结束时间
+- `reason`
+  - 缺口原因，常见值：
+  - `unsupported_history`
+  - `history_request_unavailable`
+  - `backfill_request_failed`
+  - `backfill_parse_failed`
+
+## 价格视图字段说明
+
+### `v_price_latest`
+
+从 `price_samples_1s` 中挑出每个 market + kind 最新一条样本。
+
+- `venue`
+- `symbol`
+- `price_kind`
+- `ts_ms`
+  - 最新 `1s` 桶时间
+- `open_price`
+- `high_price`
+- `low_price`
+- `close_price`
+- `updated_at_ms`
+
+### `v_price_health`
+
+把 `price_checkpoints` 和最近一次 gap 时间汇总到一起，方便看健康状态。
+
+- `venue`
+- `symbol`
+- `price_kind`
+- `status`
+- `updated_at_ms`
+- `last_live_bucket_ms`
+- `last_candle_open_ms`
+- `last_backfill_open_ms`
+- `last_gap_at_ms`
+
+### `v_price_gap_summary`
+
+按 market + kind 汇总 gap。
+
+- `venue`
+- `symbol`
+- `price_kind`
+- `gap_count`
+- `last_gap_at_ms`
 
 ## 价格写入策略
 
