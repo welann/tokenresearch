@@ -266,6 +266,48 @@ async fn runtime_processes_multiple_venues_without_blocking_on_first_stream() {
     assert_eq!(hyperliquid.len(), 1);
 }
 
+#[tokio::test]
+async fn runtime_backfill_error_includes_response_preview() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("token_prices.sqlite");
+    let store = SqlitePriceStore::connect(&db_path).await.expect("connect");
+    store.init().await.expect("init");
+
+    let rest = FakeRest::default();
+    rest.gets.lock().expect("gets").insert(
+        "https://fapi.binance.com/fapi/v1/exchangeInfo".to_string(),
+        common::fixture("price/binance/discovery.json"),
+    );
+    rest.gets.lock().expect("gets").insert(
+        "https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=1m&limit=500&startTime=1710000000000&endTime=1710000119999".to_string(),
+        r#"[[1710000000000,"62000.0","62020.0","61980.0","62010.0","bad-volume",1710000059999]]"#.to_string(),
+    );
+
+    let error = run_price_runtime_once(
+        PriceRuntimeConfig {
+            database_path: db_path.display().to_string(),
+            sample_retention_days: 30,
+            discovery_max_attempts: 1,
+            backfill_minutes_on_empty_start: 2,
+        },
+        store,
+        rest,
+        FakeWsClient::default(),
+        FakeClock {
+            now_ms: Arc::new(Mutex::new(1_710_000_120_500)),
+        },
+        vec![Arc::new(BinancePriceAdapter::default()) as Arc<dyn PriceVenueAdapter>],
+    )
+    .await
+    .expect_err("backfill should fail");
+    let message = error.to_string();
+
+    assert!(message.contains("price history parse failed"));
+    assert!(message.contains("BTCUSDT"));
+    assert!(message.contains("bad-volume"));
+    assert!(message.contains("https://fapi.binance.com/fapi/v1/klines"));
+}
+
 #[derive(Clone)]
 struct FakeRestWithPosts {
     gets: Arc<Mutex<HashMap<String, String>>>,

@@ -1,5 +1,6 @@
 pub mod adapters;
 pub mod book;
+pub mod diagnostics;
 pub mod model;
 pub mod price_adapters;
 pub mod price_model;

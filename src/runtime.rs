@@ -10,8 +10,9 @@ use thiserror::Error;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::adapters::{
-    BinanceAdapter, HttpMethod, HyperliquidAdapter, LighterAdapter, VenueAdapter,
+    BinanceAdapter, DiscoveryRequest, HttpMethod, HyperliquidAdapter, LighterAdapter, VenueAdapter,
 };
+use crate::diagnostics::{http_method_name, preview_optional_json, preview_text};
 use crate::model::{BookView, GapWindow, MarketRef, NormalizedBookEvent, NormalizedMarket};
 use crate::sync::{BinanceBookSync, GenericBookSync, SyncOutcome};
 use crate::traits::{
@@ -113,16 +114,23 @@ where
         adapter: &A,
     ) -> DynResult<Vec<NormalizedMarket>> {
         let request = adapter.discovery_request();
-        let body = match request.method {
-            HttpMethod::Get => rest.get_text(&request.url).await?,
-            HttpMethod::Post => {
-                rest.post_json_text(&request.url, request.body.as_ref().unwrap_or(&Value::Null))
-                    .await?
-            }
-        };
+        let request_method = http_method_name(request.method);
+        let request_body = preview_optional_json(request.body.as_ref());
+        let request_url = request.url.clone();
+        let body = execute_request(rest, &request).await?;
         let markets = adapter
             .discover_markets(&body)
-            .map_err(|error| RuntimeError::Other(error.to_string()))?;
+            .map_err(|error| {
+                RuntimeError::Other(format!(
+                    "market discovery parse failed venue={} method={} url={} request_body={} response_preview={} error={}",
+                    adapter.venue().as_str(),
+                    request_method,
+                    request_url,
+                    request_body,
+                    preview_text(&body),
+                    error,
+                ))
+            })?;
         self.store.upsert_markets(&markets).await?;
         Ok(markets)
     }
@@ -402,10 +410,16 @@ where
         let adapter = BinanceAdapter;
         let mut backoff_ms = self.config.reconnect_backoff_ms;
         loop {
-            let mut connection = match ws.connect(&adapter.ws_url(&markets)).await {
+            let ws_url = adapter.ws_url(&markets);
+            let mut connection = match ws.connect(&ws_url).await {
                 Ok(connection) => connection,
                 Err(error) => {
-                    tracing::warn!(?error, "binance websocket connect failed");
+                    tracing::warn!(
+                        error = %error,
+                        url = %ws_url,
+                        market_count = markets.len(),
+                        "binance websocket connect failed"
+                    );
                     self.clock.sleep(Duration::from_millis(backoff_ms)).await;
                     backoff_ms = (backoff_ms * 2).min(self.config.reconnect_backoff_cap_ms);
                     continue;
@@ -512,11 +526,26 @@ where
                                     }
                                     Ok(None) => {}
                                     Err(error) => {
-                                        tracing::warn!(?error, "binance websocket parse failed");
+                                        tracing::warn!(
+                                            error = %error,
+                                            url = %ws_url,
+                                            raw_payload = %preview_text(&raw),
+                                            "binance websocket parse failed"
+                                        );
                                     }
                                 }
                             }
-                            Ok(None) | Err(_) => {
+                            Ok(None) => {
+                                tracing::warn!(url = %ws_url, "binance websocket closed");
+                                self.record_disconnect_gaps(&mut states, "binance_disconnect").await?;
+                                break;
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    error = %error,
+                                    url = %ws_url,
+                                    "binance websocket receive failed"
+                                );
                                 self.record_disconnect_gaps(&mut states, "binance_disconnect").await?;
                                 break;
                             }
@@ -543,10 +572,17 @@ where
     {
         let mut backoff_ms = self.config.reconnect_backoff_ms;
         loop {
-            let mut connection = match ws.connect(&adapter.ws_url(&markets)).await {
+            let ws_url = adapter.ws_url(&markets);
+            let mut connection = match ws.connect(&ws_url).await {
                 Ok(connection) => connection,
                 Err(error) => {
-                    tracing::warn!(?error, venue = %adapter.venue().as_str(), "generic websocket connect failed");
+                    tracing::warn!(
+                        error = %error,
+                        venue = %adapter.venue().as_str(),
+                        url = %ws_url,
+                        market_count = markets.len(),
+                        "generic websocket connect failed"
+                    );
                     self.clock.sleep(Duration::from_millis(backoff_ms)).await;
                     backoff_ms = (backoff_ms * 2).min(self.config.reconnect_backoff_cap_ms);
                     continue;
@@ -578,10 +614,32 @@ where
                         }
                         Ok(None) => {}
                         Err(error) => {
-                            tracing::warn!(?error, venue = %adapter.venue().as_str(), "generic websocket parse failed");
+                            tracing::warn!(
+                                error = %error,
+                                venue = %adapter.venue().as_str(),
+                                url = %ws_url,
+                                raw_payload = %preview_text(&raw),
+                                "generic websocket parse failed"
+                            );
                         }
                     },
-                    Ok(None) | Err(_) => {
+                    Ok(None) => {
+                        tracing::warn!(
+                            venue = %adapter.venue().as_str(),
+                            url = %ws_url,
+                            "generic websocket closed"
+                        );
+                        self.record_disconnect_gaps(&mut states, "ws_disconnect")
+                            .await?;
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            venue = %adapter.venue().as_str(),
+                            url = %ws_url,
+                            "generic websocket receive failed"
+                        );
                         self.record_disconnect_gaps(&mut states, "ws_disconnect")
                             .await?;
                         break;
@@ -654,16 +712,50 @@ async fn fetch_binance_snapshot<R: RestClient>(
     let request = BinanceAdapter
         .snapshot_request(market)
         .ok_or_else(|| RuntimeError::Other("binance snapshot request missing".to_string()))?;
-    let body = match request.method {
-        HttpMethod::Get => rest.get_text(&request.url).await?,
-        HttpMethod::Post => {
-            rest.post_json_text(&request.url, request.body.as_ref().unwrap_or(&Value::Null))
-                .await?
-        }
-    };
+    let request_method = http_method_name(request.method);
+    let request_body = preview_optional_json(request.body.as_ref());
+    let request_url = request.url.clone();
+    let body = execute_request(rest, &request).await?;
     BinanceAdapter
         .parse_snapshot(market, &body, received_ts_ms)
-        .map_err(|error| RuntimeError::Other(error.to_string()).into())
+        .map_err(|error| {
+            RuntimeError::Other(format!(
+                "binance snapshot parse failed market={} method={} url={} request_body={} response_preview={} error={}",
+                market.market.symbol,
+                request_method,
+                request_url,
+                request_body,
+                preview_text(&body),
+                error,
+            ))
+            .into()
+        })
+}
+
+async fn execute_request(rest: &dyn RestClient, request: &DiscoveryRequest) -> DynResult<String> {
+    let request_method = http_method_name(request.method);
+    let request_body = preview_optional_json(request.body.as_ref());
+    match request.method {
+        HttpMethod::Get => rest.get_text(&request.url).await.map_err(|error| {
+            RuntimeError::Other(format!(
+                "http request failed method={} url={} request_body={} error={}",
+                request_method, request.url, request_body, error,
+            ))
+            .into()
+        }),
+        HttpMethod::Post => {
+            let body = request.body.clone().unwrap_or(Value::Null);
+            rest.post_json_text(&request.url, &body)
+                .await
+                .map_err(|error| {
+                    RuntimeError::Other(format!(
+                        "http request failed method={} url={} request_body={} error={}",
+                        request_method, request.url, request_body, error,
+                    ))
+                    .into()
+                })
+        }
+    }
 }
 
 impl DisconnectMarket for BinanceBookSync {

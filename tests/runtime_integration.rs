@@ -255,6 +255,33 @@ async fn discovery_retries_after_transient_rest_failure() {
 }
 
 #[tokio::test]
+async fn discovery_error_includes_response_preview() {
+    let runtime = CollectorRuntime::new(
+        Arc::new(RecordingStore::default()),
+        Arc::new(FakeClock::default()),
+        RuntimeConfig::default(),
+    );
+    let url = "https://fapi.binance.com/fapi/v1/exchangeInfo".to_string();
+    let rest = FakeRest {
+        responses: Arc::new(HashMap::from([(
+            url.clone(),
+            r#"{"symbols":[{"contractType":"PERPETUAL"}]}"#.to_string(),
+        )])),
+        transient_failures: Arc::new(Mutex::new(HashMap::new())),
+    };
+
+    let error = runtime
+        .discover_markets(&rest, &BinanceAdapter)
+        .await
+        .expect_err("discovery should fail");
+    let message = error.to_string();
+
+    assert!(message.contains("market discovery parse failed"));
+    assert!(message.contains(&url));
+    assert!(message.contains(r#""contractType":"PERPETUAL""#));
+}
+
+#[tokio::test]
 async fn discovery_uses_cached_markets_before_remote() {
     let dir = tempdir().expect("tempdir");
     let db_path = dir.path().join("collector.sqlite");

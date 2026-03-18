@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,6 +8,7 @@ use serde::Deserialize;
 use tracing::{info, warn};
 
 use crate::adapters::{DiscoveryRequest, HttpMethod};
+use crate::diagnostics::{http_method_name, preview_optional_json, preview_text};
 use crate::model::MarketRef;
 use crate::price_adapters::PriceVenueAdapter;
 use crate::price_model::{
@@ -356,10 +358,23 @@ where
     let mut backoff = Duration::from_millis(500);
     for attempt in 1..=config.discovery_max_attempts {
         let request = adapter.discovery_request();
+        let request_method = http_method_name(request.method);
+        let request_body = preview_optional_json(request.body.as_ref());
+        let request_url = request.url.clone();
         let body = execute_request(rest, &request).await;
         match body {
             Ok(body) => {
-                let markets = adapter.discover_markets(&body)?;
+                let markets = adapter.discover_markets(&body).map_err(|error| {
+                    io::Error::other(format!(
+                        "price market discovery parse failed venue={} method={} url={} request_body={} response_preview={} error={}",
+                        adapter.venue(),
+                        request_method,
+                        request_url,
+                        request_body,
+                        preview_text(&body),
+                        error,
+                    ))
+                })?;
                 store.upsert_price_markets(&markets).await?;
                 info!(
                     venue = %adapter.venue(),
@@ -449,8 +464,25 @@ where
                             limit: 500,
                         })
                     {
+                        let request_method = http_method_name(request.method);
+                        let request_body = preview_optional_json(request.body.as_ref());
+                        let request_url = request.url.clone();
                         let body = execute_request(rest, &request).await?;
-                        let candles = adapter.parse_history_candles(market, kind, &body)?;
+                        let candles = adapter.parse_history_candles(market, kind, &body).map_err(
+                            |error| {
+                                io::Error::other(format!(
+                                    "price history parse failed venue={} market={} kind={} method={} url={} request_body={} response_preview={} error={}",
+                                    adapter.venue(),
+                                    market.market.symbol,
+                                    kind.as_str(),
+                                    request_method,
+                                    request_url,
+                                    request_body,
+                                    preview_text(&body),
+                                    error,
+                                ))
+                            },
+                        )?;
                         let checkpoint = candles.last().map(|last| PriceCheckpoint {
                             market: market.market.clone(),
                             kind,
@@ -519,63 +551,103 @@ where
     W: WsClient + Send + Sync,
     C: Clock + Send + Sync,
 {
-    let mut connection = ws.connect(&adapter.ws_url()).await?;
+    let ws_url = adapter.ws_url();
+    let mut connection = ws.connect(&ws_url).await.map_err(|error| {
+        io::Error::other(format!(
+            "price websocket connect failed venue={} url={} error={}",
+            adapter.venue(),
+            ws_url,
+            error,
+        ))
+    })?;
     info!(
         venue = %adapter.venue(),
         market_count = markets.len(),
-        url = %adapter.ws_url(),
+        url = %ws_url,
         "price websocket connected"
     );
     for message in adapter.subscription_messages(markets) {
-        connection.send_text(message).await?;
+        let preview = preview_text(&message);
+        connection.send_text(message).await.map_err(|error| {
+            io::Error::other(format!(
+                "price websocket subscription failed venue={} url={} message_preview={} error={}",
+                adapter.venue(),
+                ws_url,
+                preview,
+                error,
+            ))
+        })?;
     }
 
     let mut epoch_by_key: HashMap<(String, PriceKind), i64> = HashMap::new();
     let mut aggregator_by_key: HashMap<(String, PriceKind), PriceAggregator> = HashMap::new();
 
-    while let Some(raw) = connection.next_text().await? {
-        if let Some(tick) = adapter.parse_ws_message(&raw, clock.now_ms())? {
-            let epoch_id = match epoch_by_key.get(&(tick.market.symbol.clone(), tick.kind)) {
-                Some(epoch_id) => *epoch_id,
-                None => {
-                    let epoch_id = store
-                        .open_price_epoch(run_id, &tick.market, tick.kind, 1, clock.now_ms())
-                        .await?;
-                    epoch_by_key.insert((tick.market.symbol.clone(), tick.kind), epoch_id);
-                    epoch_id
-                }
-            };
+    while let Some(raw) = connection.next_text().await.map_err(|error| {
+        io::Error::other(format!(
+            "price websocket receive failed venue={} url={} error={}",
+            adapter.venue(),
+            ws_url,
+            error,
+        ))
+    })? {
+        match adapter.parse_ws_message(&raw, clock.now_ms()) {
+            Ok(Some(tick)) => {
+                let epoch_id = match epoch_by_key.get(&(tick.market.symbol.clone(), tick.kind)) {
+                    Some(epoch_id) => *epoch_id,
+                    None => {
+                        let epoch_id = store
+                            .open_price_epoch(run_id, &tick.market, tick.kind, 1, clock.now_ms())
+                            .await?;
+                        epoch_by_key.insert((tick.market.symbol.clone(), tick.kind), epoch_id);
+                        epoch_id
+                    }
+                };
 
-            let aggregator = aggregator_by_key
-                .entry((tick.market.symbol.clone(), tick.kind))
-                .or_default();
-            let (samples, candles) = aggregator.apply_tick(&tick);
-            let checkpoint = PriceCheckpoint {
-                market: tick.market.clone(),
-                kind: tick.kind,
-                epoch_id,
-                last_live_bucket_ms: Some((tick.received_ts_ms / ONE_SECOND_MS) * ONE_SECOND_MS),
-                last_candle_open_ms: Some((tick.received_ts_ms / ONE_MINUTE_MS) * ONE_MINUTE_MS),
-                last_backfill_open_ms: store
-                    .load_price_checkpoint(&tick.market, tick.kind)
-                    .await?
-                    .and_then(|value| value.last_backfill_open_ms),
-                last_exchange_ts_ms: tick.exchange_ts_ms,
-                updated_at_ms: clock.now_ms(),
-                status: "live".to_string(),
-            };
-            store
-                .commit_price_batch(PriceCommitBatch {
+                let aggregator = aggregator_by_key
+                    .entry((tick.market.symbol.clone(), tick.kind))
+                    .or_default();
+                let (samples, candles) = aggregator.apply_tick(&tick);
+                let checkpoint = PriceCheckpoint {
                     market: tick.market.clone(),
                     kind: tick.kind,
-                    epoch_id: Some(epoch_id),
-                    samples_1s: samples,
-                    candles_1m: candles,
-                    checkpoint: Some(checkpoint),
-                    gaps: Vec::new(),
-                })
-                .await?;
-        }
+                    epoch_id,
+                    last_live_bucket_ms: Some(
+                        (tick.received_ts_ms / ONE_SECOND_MS) * ONE_SECOND_MS,
+                    ),
+                    last_candle_open_ms: Some(
+                        (tick.received_ts_ms / ONE_MINUTE_MS) * ONE_MINUTE_MS,
+                    ),
+                    last_backfill_open_ms: store
+                        .load_price_checkpoint(&tick.market, tick.kind)
+                        .await?
+                        .and_then(|value| value.last_backfill_open_ms),
+                    last_exchange_ts_ms: tick.exchange_ts_ms,
+                    updated_at_ms: clock.now_ms(),
+                    status: "live".to_string(),
+                };
+                store
+                    .commit_price_batch(PriceCommitBatch {
+                        market: tick.market.clone(),
+                        kind: tick.kind,
+                        epoch_id: Some(epoch_id),
+                        samples_1s: samples,
+                        candles_1m: candles,
+                        checkpoint: Some(checkpoint),
+                        gaps: Vec::new(),
+                    })
+                    .await?;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                warn!(
+                    venue = %adapter.venue(),
+                    url = %ws_url,
+                    error = %error,
+                    raw_payload = %preview_text(&raw),
+                    "price websocket parse failed"
+                );
+            }
+        };
     }
 
     for ((symbol, kind), aggregator) in aggregator_by_key {
@@ -633,11 +705,27 @@ async fn execute_request<R>(rest: &R, request: &DiscoveryRequest) -> DynResult<S
 where
     R: RestClient + Send + Sync,
 {
+    let request_method = http_method_name(request.method);
+    let request_body = preview_optional_json(request.body.as_ref());
     match request.method {
-        HttpMethod::Get => rest.get_text(&request.url).await,
+        HttpMethod::Get => rest.get_text(&request.url).await.map_err(|error| {
+            io::Error::other(format!(
+                "http request failed method={} url={} request_body={} error={}",
+                request_method, request.url, request_body, error,
+            ))
+            .into()
+        }),
         HttpMethod::Post => {
             let body = request.body.clone().unwrap_or_default();
-            rest.post_json_text(&request.url, &body).await
+            rest.post_json_text(&request.url, &body)
+                .await
+                .map_err(|error| {
+                    io::Error::other(format!(
+                        "http request failed method={} url={} request_body={} error={}",
+                        request_method, request.url, request_body, error,
+                    ))
+                    .into()
+                })
         }
     }
 }
