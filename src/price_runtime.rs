@@ -19,6 +19,7 @@ use crate::traits::{Clock, DynResult, PriceStore, RestClient, WsClient};
 
 const ONE_MINUTE_MS: i64 = 60_000;
 const ONE_SECOND_MS: i64 = 1_000;
+const HISTORY_PAGE_LIMIT: usize = 500;
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct PriceRuntimeConfig {
@@ -28,8 +29,8 @@ pub struct PriceRuntimeConfig {
     pub sample_retention_days: i64,
     #[serde(default = "default_discovery_max_attempts")]
     pub discovery_max_attempts: usize,
-    #[serde(default = "default_backfill_minutes_on_empty_start")]
-    pub backfill_minutes_on_empty_start: i64,
+    #[serde(default = "default_backfill_window_days")]
+    pub backfill_window_days: i64,
 }
 
 fn default_price_db() -> String {
@@ -44,8 +45,8 @@ fn default_discovery_max_attempts() -> usize {
     5
 }
 
-fn default_backfill_minutes_on_empty_start() -> i64 {
-    120
+fn default_backfill_window_days() -> i64 {
+    90
 }
 
 impl Default for PriceRuntimeConfig {
@@ -54,7 +55,7 @@ impl Default for PriceRuntimeConfig {
             database_path: default_price_db(),
             sample_retention_days: default_sample_retention_days(),
             discovery_max_attempts: default_discovery_max_attempts(),
-            backfill_minutes_on_empty_start: default_backfill_minutes_on_empty_start(),
+            backfill_window_days: default_backfill_window_days(),
         }
     }
 }
@@ -77,6 +78,7 @@ pub fn plan_backfill(
     kind: PriceKind,
     supports_history: bool,
     now_ms: i64,
+    backfill_window_days: i64,
 ) -> BackfillDecision {
     if !supports_history {
         return BackfillDecision::Gap {
@@ -94,15 +96,23 @@ pub fn plan_backfill(
         return BackfillDecision::Skip;
     }
 
-    let Some(checkpoint) = checkpoint else {
+    let backfill_window_minutes = backfill_window_days.saturating_mul(24 * 60);
+    if backfill_window_minutes <= 0 {
         return BackfillDecision::Skip;
-    };
+    }
+
+    let window_start_open_ms =
+        last_closed_open_ms - (backfill_window_minutes - 1).saturating_mul(ONE_MINUTE_MS);
 
     let from_open_ms = checkpoint
-        .last_backfill_open_ms
-        .or(checkpoint.last_candle_open_ms)
-        .map(|value| value + ONE_MINUTE_MS)
-        .unwrap_or(last_closed_open_ms);
+        .and_then(|checkpoint| {
+            checkpoint
+                .last_backfill_open_ms
+                .or(checkpoint.last_candle_open_ms)
+                .map(|value| value + ONE_MINUTE_MS)
+        })
+        .map(|value| value.max(window_start_open_ms))
+        .unwrap_or(window_start_open_ms);
 
     if from_open_ms > last_closed_open_ms {
         BackfillDecision::Skip
@@ -112,6 +122,11 @@ pub fn plan_backfill(
             end_open_ms: last_closed_open_ms,
         }
     }
+}
+
+fn backfill_chunk_end(start_open_ms: i64, end_open_ms: i64) -> i64 {
+    let page_span_ms = (HISTORY_PAGE_LIMIT as i64 - 1) * ONE_MINUTE_MS;
+    (start_open_ms + page_span_ms).min(end_open_ms)
 }
 
 #[derive(Clone, Debug)]
@@ -430,59 +445,151 @@ where
                 PriceKind::All => false,
             };
 
-            let decision = match checkpoint.as_ref() {
-                Some(checkpoint) => {
-                    plan_backfill(Some(checkpoint), kind, supports_history, clock.now_ms())
-                }
-                None if supports_history => {
-                    let last_closed =
-                        ((clock.now_ms() / ONE_MINUTE_MS) * ONE_MINUTE_MS) - ONE_MINUTE_MS;
-                    let start_open = last_closed
-                        - ((config.backfill_minutes_on_empty_start - 1).max(0) * ONE_MINUTE_MS);
-                    BackfillDecision::Fetch {
-                        start_open_ms: start_open,
-                        end_open_ms: last_closed,
-                    }
-                }
-                None => BackfillDecision::Gap {
-                    resolution: PriceResolution::OneMinute,
-                    reason: "unsupported_history".to_string(),
-                },
-            };
+            let decision = plan_backfill(
+                checkpoint.as_ref(),
+                kind,
+                supports_history,
+                clock.now_ms(),
+                config.backfill_window_days,
+            );
 
             match decision {
                 BackfillDecision::Fetch {
                     start_open_ms,
                     end_open_ms,
                 } => {
-                    if let Some(request) =
-                        adapter.history_request(crate::price_model::PriceHistoryRequest {
-                            market: market.clone(),
-                            kind,
-                            start_ms: start_open_ms,
-                            end_ms: end_open_ms + ONE_MINUTE_MS - 1,
-                            limit: 500,
-                        })
-                    {
+                    let mut chunk_start_open_ms = start_open_ms;
+                    while chunk_start_open_ms <= end_open_ms {
+                        let chunk_end_open_ms =
+                            backfill_chunk_end(chunk_start_open_ms, end_open_ms);
+                        let Some(request) =
+                            adapter.history_request(crate::price_model::PriceHistoryRequest {
+                                market: market.clone(),
+                                kind,
+                                start_ms: chunk_start_open_ms,
+                                end_ms: chunk_end_open_ms + ONE_MINUTE_MS - 1,
+                                limit: HISTORY_PAGE_LIMIT,
+                            })
+                        else {
+                            warn!(
+                                venue = %adapter.venue(),
+                                market = %market.market.symbol,
+                                kind = %kind,
+                                start_open_ms = chunk_start_open_ms,
+                                end_open_ms = chunk_end_open_ms,
+                                "price history request unavailable for backfill chunk"
+                            );
+                            store
+                                .commit_price_batch(PriceCommitBatch {
+                                    market: market.market.clone(),
+                                    kind,
+                                    epoch_id: Some(epoch_id),
+                                    samples_1s: Vec::new(),
+                                    candles_1m: Vec::new(),
+                                    checkpoint: None,
+                                    gaps: vec![PriceGapWindow {
+                                        market: market.market.clone(),
+                                        kind,
+                                        resolution: PriceResolution::OneMinute,
+                                        started_at_ms: chunk_start_open_ms,
+                                        ended_at_ms: end_open_ms + ONE_MINUTE_MS - 1,
+                                        reason: "history_request_unavailable".to_string(),
+                                    }],
+                                })
+                                .await?;
+                            break;
+                        };
                         let request_method = http_method_name(request.method);
                         let request_body = preview_optional_json(request.body.as_ref());
                         let request_url = request.url.clone();
-                        let body = execute_request(rest, &request).await?;
-                        let candles = adapter.parse_history_candles(market, kind, &body).map_err(
-                            |error| {
-                                io::Error::other(format!(
-                                    "price history parse failed venue={} market={} kind={} method={} url={} request_body={} response_preview={} error={}",
-                                    adapter.venue(),
-                                    market.market.symbol,
-                                    kind.as_str(),
-                                    request_method,
-                                    request_url,
-                                    request_body,
-                                    preview_text(&body),
-                                    error,
-                                ))
-                            },
-                        )?;
+                        let body = match execute_request(rest, &request).await {
+                            Ok(body) => body,
+                            Err(error) => {
+                                warn!(
+                                    venue = %adapter.venue(),
+                                    market = %market.market.symbol,
+                                    kind = %kind,
+                                    method = request_method,
+                                    url = %request_url,
+                                    request_body = %request_body,
+                                    start_open_ms = chunk_start_open_ms,
+                                    end_open_ms = chunk_end_open_ms,
+                                    error = %error,
+                                    "price history request failed"
+                                );
+                                store
+                                    .commit_price_batch(PriceCommitBatch {
+                                        market: market.market.clone(),
+                                        kind,
+                                        epoch_id: Some(epoch_id),
+                                        samples_1s: Vec::new(),
+                                        candles_1m: Vec::new(),
+                                        checkpoint: None,
+                                        gaps: vec![PriceGapWindow {
+                                            market: market.market.clone(),
+                                            kind,
+                                            resolution: PriceResolution::OneMinute,
+                                            started_at_ms: chunk_start_open_ms,
+                                            ended_at_ms: end_open_ms + ONE_MINUTE_MS - 1,
+                                            reason: "backfill_request_failed".to_string(),
+                                        }],
+                                    })
+                                    .await?;
+                                break;
+                            }
+                        };
+                        let candles =
+                            match adapter.parse_history_candles(market, kind, &body).map_err(
+                                |error| {
+                                    io::Error::other(format!(
+                                        "price history parse failed venue={} market={} kind={} method={} url={} request_body={} response_preview={} error={}",
+                                        adapter.venue(),
+                                        market.market.symbol,
+                                        kind.as_str(),
+                                        request_method,
+                                        request_url,
+                                        request_body,
+                                        preview_text(&body),
+                                        error,
+                                    ))
+                                },
+                            ) {
+                                Ok(candles) => candles,
+                                Err(error) => {
+                                    warn!(
+                                        venue = %adapter.venue(),
+                                        market = %market.market.symbol,
+                                        kind = %kind,
+                                        method = request_method,
+                                        url = %request_url,
+                                        request_body = %request_body,
+                                        response_preview = %preview_text(&body),
+                                        start_open_ms = chunk_start_open_ms,
+                                        end_open_ms = chunk_end_open_ms,
+                                        error = %error,
+                                        "price history parse failed"
+                                    );
+                                    store
+                                        .commit_price_batch(PriceCommitBatch {
+                                            market: market.market.clone(),
+                                            kind,
+                                            epoch_id: Some(epoch_id),
+                                            samples_1s: Vec::new(),
+                                            candles_1m: Vec::new(),
+                                            checkpoint: None,
+                                            gaps: vec![PriceGapWindow {
+                                                market: market.market.clone(),
+                                                kind,
+                                                resolution: PriceResolution::OneMinute,
+                                                started_at_ms: chunk_start_open_ms,
+                                                ended_at_ms: end_open_ms + ONE_MINUTE_MS - 1,
+                                                reason: "backfill_parse_failed".to_string(),
+                                            }],
+                                        })
+                                        .await?;
+                                    break;
+                                }
+                            };
                         let checkpoint = candles.last().map(|last| PriceCheckpoint {
                             market: market.market.clone(),
                             kind,
@@ -509,6 +616,7 @@ where
                                 gaps: Vec::new(),
                             })
                             .await?;
+                        chunk_start_open_ms = chunk_end_open_ms + ONE_MINUTE_MS;
                     }
                 }
                 BackfillDecision::Gap { resolution, reason } => {

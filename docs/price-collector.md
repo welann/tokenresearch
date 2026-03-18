@@ -51,14 +51,14 @@ flowchart TD
     B --> C["load checkpoint"]
     C --> D{"history supported?"}
     D -- no --> E["write price_gap_windows(reason=unsupported_history)"]
-    D -- yes --> F{"checkpoint exists?"}
-    F -- yes --> G["plan_backfill from last_backfill_open_ms + 1m"]
-    F -- no --> H["bootstrap last N closed minutes"]
-    G --> I["history request by venue adapter"]
-    H --> I
-    I --> J["parse 1m candles"]
-    J --> K["upsert price_candles_1m"]
+    D -- yes --> F["compute trailing window from now - backfill_window_days"]
+    F --> G["clamp start to max(window_start, checkpoint + 1m)"]
+    G --> H["split into 500-candle pages"]
+    H --> I["history request by venue adapter"]
+    I --> J{"request / parse ok?"}
+    J -- yes --> K["upsert price_candles_1m"]
     K --> L["update price_checkpoints"]
+    J -- no --> M["write price_gap_windows(reason=backfill_*_failed) and continue live"]
 ```
 
 ## 查询视角
@@ -91,3 +91,4 @@ flowchart LR
 - 当前 `pricecollector` 采用 cycle + reconnect 方式，live websocket 断开后重新进入 discovery/backfill/live 周期
 - 当前 `reference` 历史只对 Binance 做官方回补
 - 当前 `1s` 样本是最近窗口的高频查询层，不是长期归档层
+- 历史回补窗口默认是“当前时间往前 90 天”，通过 `backfill_window_days` 配置

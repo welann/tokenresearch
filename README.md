@@ -110,7 +110,10 @@ cargo run --release -- config.toml.example
 - `database_path`
 - `sample_retention_days`
 - `discovery_max_attempts`
-- `backfill_minutes_on_empty_start`
+- `backfill_window_days`
+  - 默认 `90`
+  - 表示启动时会尝试补齐“从当前时间往前 N 天”的 `1m` 历史价格
+  - 设为 `0` 可关闭历史回补，只保留 live websocket 价格采集
 - `restart_delay_ms`
 - `venues`
 
