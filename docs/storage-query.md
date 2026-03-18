@@ -360,6 +360,35 @@ flowchart LR
 - `price_gaps(token, venue, range)`
 - `price_health(venue, market_symbol, kind)`
 
+### 为什么价格查询可以不带 `venue`
+
+价格查询 API 默认支持 token 级查询。
+
+也就是说，当你只提供：
+
+- `token`
+- `kind`
+- 时间范围 / resolution
+
+查询层会先在 `price_markets` 里找到这个 token 对应的所有市场，然后返回：
+
+- `latest_price`
+  - 返回多个 `LatestPrice`
+- `price_range`
+  - 返回多个 `PriceSeries`
+
+这里的“多个”不是做跨交易所聚合平均，而是“每个 venue / market 各自独立返回一条结果”。
+
+这样设计的原因是：
+
+- 同一个 token 在不同交易所的市场符号不一致
+  - Binance 常见是 `BTCUSDT`
+  - Hyperliquid / Lighter 常见是 `BTC`
+- 用户很多时候先想看“BTC 在三家上的价格情况”，而不是先记住每家的原始 symbol
+
+如果要限制到单一交易所，就传 `venue`。
+如果要限制到单一原始市场，就同时传 `venue + market_symbol`。
+
 ## 查询 CLI
 
 统一查询二进制：

@@ -123,6 +123,56 @@ cargo run --release -- config.toml.example
 - `restart_delay_ms`
 - `venues`
 
+## 价格查询为什么可以不指定交易所
+
+价格查询接口默认支持两种视角：
+
+- token 视角
+  - 只给 `--token BTC`
+  - 会匹配这个 token 在所有交易所上的价格市场
+  - 返回结果不是“合并成一个价格”，而是“每个 venue 一条独立结果”
+- 原始市场视角
+  - 给 `--venue` 加 `--symbol`
+  - 只查询某个交易所上的某个原始市场
+
+因此文档里的部分价格示例没有写 `--venue`，是故意在演示 token 级查询，而不是漏了参数。
+
+例如：
+
+- `price-latest --token BTC --kind trade`
+  - 可能返回 Binance / Hyperliquid / Lighter 各一条最新价格
+- `price-range --token BTC --kind trade ...`
+  - 可能返回多条 `PriceSeries`
+  - 每条 series 对应一个交易所上的一个市场
+
+如果你只想看单一交易所，就显式加上：
+
+```bash
+cargo run --bin query -- \
+  --price-db token_prices.sqlite \
+  --json \
+  price-latest \
+  --token BTC \
+  --venue hyperliquid \
+  --kind trade
+```
+
+如果你想精确到某个原始市场，就再加 `--symbol`：
+
+```bash
+cargo run --bin query -- \
+  --price-db token_prices.sqlite \
+  --json \
+  price-range \
+  --token BTC \
+  --venue binance \
+  --symbol BTCUSDT \
+  --kind trade \
+  --start-ms 1767225600000 \
+  --end-ms 1768435200000 \
+  --resolution 1m
+```
+
 ## 查询 CLI
 
 查询能力提供两种使用方式：
