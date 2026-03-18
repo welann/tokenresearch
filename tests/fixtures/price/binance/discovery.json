@@ -1,0 +1,15 @@
+{
+  "symbols": [
+    {
+      "symbol": "BTCUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "baseAsset": "BTC",
+      "quoteAsset": "USDT",
+      "filters": [
+        { "filterType": "PRICE_FILTER", "tickSize": "0.1" },
+        { "filterType": "LOT_SIZE", "stepSize": "0.001" }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+database_path = "token_prices.sqlite"
+sample_retention_days = 30
+discovery_max_attempts = 5
+backfill_minutes_on_empty_start = 120
+restart_delay_ms = 1000
+venues = ["binance", "hyperliquid", "lighter"]

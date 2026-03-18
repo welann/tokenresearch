@@ -1,0 +1,12 @@
+{
+  "order_books": [
+    {
+      "market_id": 57,
+      "symbol": "BTC",
+      "market_type": "perp",
+      "status": "active",
+      "supported_price_decimals": 1,
+      "supported_size_decimals": 3
+    }
+  ]
+}

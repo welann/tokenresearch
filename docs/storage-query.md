@@ -1,45 +1,36 @@
 # 存储与查询说明
 
-本文描述 SQLite schema、物化策略以及当前的 Rust 查询接口与 CLI。
+本文描述两套 SQLite schema、物化策略以及当前的 Rust 查询接口与 CLI。
 
-## 存储结构
+## 订单簿存储结构
 
-当前 SQLite schema 由 `src/storage.rs` 初始化，核心表如下：
+订单簿数据库 schema 由 `src/storage.rs` 初始化。
 
 ### 元数据与运行状态
 
 - `markets`
-  - market 元数据缓存
 - `collector_runs`
-  - 采集器运行实例
 - `stream_epochs`
-  - 每个 market 的连续同步阶段
 
 ### 订单簿主数据
 
 - `book_events`
-  - 标准化事件日志
 - `book_snapshots`
-  - 快照元信息
 - `book_snapshot_levels`
-  - 快照档位明细
 - `latest_levels`
-  - 最新盘口物化表
 
 ### 完整性与恢复
 
 - `collector_checkpoints`
-  - 每个 market 的最新 checkpoint
 - `gap_windows`
-  - 不可补回或不可连续的缺口
 
-## 只读视图
+### 只读视图
 
 - `v_latest_best_quote`
 - `v_market_health`
 - `v_gap_summary`
 
-## 写入策略
+## 订单簿写入策略
 
 ```mermaid
 flowchart LR
@@ -66,15 +57,58 @@ flowchart LR
 - 读取最新盘口会很慢
 - 每次都要从头重放
 
-因此当前采用“双层存储”：
+因此订单簿系统采用双层存储：
 
 - 事件日志用于审计和历史重建
 - `latest_levels` 用于快速查询当前簿
 - 快照用于降低历史回放成本
 
+## 价格存储结构
+
+价格数据库 schema 由 `src/price_storage.rs` 初始化，默认文件是 `token_prices.sqlite`。
+
+### 元数据与运行状态
+
+- `price_markets`
+- `price_runs`
+- `price_stream_epochs`
+
+### 价格主数据
+
+- `price_samples_1s`
+  - 最近 30 天的实时样本
+- `price_candles_1m`
+  - 长期保存的 1m OHLCV
+
+### 完整性与恢复
+
+- `price_checkpoints`
+- `price_gap_windows`
+
+### 价格视图
+
+- `v_price_latest`
+- `v_price_health`
+- `v_price_gap_summary`
+
+## 价格写入策略
+
+```mermaid
+flowchart LR
+    A["NormalizedPriceTick"] --> B["PriceAggregator"]
+    B --> C["PriceCommitBatch"]
+    C --> D["SqlitePriceStore::commit_price_batch"]
+    D --> E["price_samples_1s"]
+    D --> F["price_candles_1m"]
+    D --> G["price_checkpoints"]
+    D --> H["price_gap_windows"]
+```
+
 ## 查询接口
 
-`src/query.rs` 当前提供：
+### 订单簿查询
+
+`src/query.rs` 提供：
 
 - `list_markets(venue)`
 - `latest_book(market, depth)`
@@ -84,13 +118,23 @@ flowchart LR
 - `collector_state(market)`
 - `book_at(market, ts_ms, depth)`
 
+### 价格查询
+
+`src/price_query.rs` 提供：
+
+- `list_price_markets(venue)`
+- `latest_price(token, kind, venue, market_symbol)`
+- `price_range(request)`
+- `price_gaps(token, venue, range)`
+- `price_health(venue, market_symbol, kind)`
+
 ## 查询 CLI
 
-当前仓库还提供独立查询二进制：
+统一查询二进制：
 
 - `cargo run --bin query -- ...`
 
-支持的子命令：
+### 订单簿子命令
 
 - `markets`
 - `latest`
@@ -100,24 +144,26 @@ flowchart LR
 - `gaps`
 - `health`
 
-所有子命令都支持：
+### 价格子命令
 
-- `--db <sqlite_path>`
-- `--json`
+- `price-markets`
+- `price-latest`
+- `price-range`
+- `price-gaps`
+- `price-health`
 
-`markets`，列出全部市场：
+### 全局参数
+
+- 订单簿库：`--db <sqlite_path>`，默认 `tokenresearch.sqlite`
+- 价格库：`--price-db <sqlite_path>`，默认 `token_prices.sqlite`
+- 输出 JSON：`--json`
+
+## CLI 示例
+
+`markets`，列出全部订单簿市场：
 
 ```bash
 cargo run --bin query -- --db tokenresearch.sqlite markets
-```
-
-`markets`，只看单个交易所：
-
-```bash
-cargo run --bin query -- \
-  --db tokenresearch.sqlite \
-  markets \
-  --venue hyperliquid
 ```
 
 `latest`，查询最新盘口：
@@ -144,48 +190,58 @@ cargo run --bin query -- \
   --depth 10
 ```
 
-`events`，查询事件流水：
+`price-markets`，列出价格市场：
 
 ```bash
 cargo run --bin query -- \
-  --db tokenresearch.sqlite \
-  events \
+  --price-db token_prices.sqlite \
+  price-markets
+```
+
+`price-latest`，查看最新价格：
+
+```bash
+cargo run --bin query -- \
+  --price-db token_prices.sqlite \
+  --json \
+  price-latest \
+  --token BTC \
+  --kind trade
+```
+
+`price-range`，查询指定时间范围：
+
+```bash
+cargo run --bin query -- \
+  --price-db token_prices.sqlite \
+  --json \
+  price-range \
+  --token BTC \
+  --kind trade \
+  --start-ms 1767225600000 \
+  --end-ms 1768435200000 \
+  --resolution 1m
+```
+
+`price-gaps`，查询价格缺口：
+
+```bash
+cargo run --bin query -- \
+  --price-db token_prices.sqlite \
+  price-gaps \
+  --token BTC
+```
+
+`price-health`，查询价格流健康状态：
+
+```bash
+cargo run --bin query -- \
+  --price-db token_prices.sqlite \
+  --json \
+  price-health \
   --venue binance \
   --symbol BTCUSDT \
-  --start-ms 1710000000000 \
-  --end-ms 1710000600000 \
-  --limit 20
-```
-
-`snapshots`，查询快照：
-
-```bash
-cargo run --bin query -- \
-  --db tokenresearch.sqlite \
-  snapshots \
-  --venue lighter \
-  --symbol PROVE \
-  --limit 10
-```
-
-`gaps`，查询缺口：
-
-```bash
-cargo run --bin query -- \
-  --db tokenresearch.sqlite \
-  gaps \
-  --venue binance \
-  --symbol BTCUSDT
-```
-
-`health`，查询 market 健康状态：
-
-```bash
-cargo run --bin query -- \
-  --db tokenresearch.sqlite \
-  health \
-  --venue hyperliquid \
-  --symbol BTC
+  --kind trade
 ```
 
 ## `book_at` 的语义
@@ -210,17 +266,28 @@ flowchart TD
     G --> H["return reconstructed BookView"]
 ```
 
+## `price_range` 的语义
+
+- `resolution=auto`
+  - 如果窗口完整落在 `1s` 保留期内，并且没有命中 `1s` gap，则返回 `1s`
+  - 否则回退到 `1m`
+- `resolution=1s`
+  - 超出 `30d` 保留期或命中 gap，直接返回错误
+- `token` 查询
+  - 返回每个 venue 的独立 `PriceSeries`
+- `venue + symbol` 查询
+  - 返回单个市场的原始序列
+
 ## 精度与数值存储
 
 为了避免浮点误差：
 
 - Rust 内部使用 `rust_decimal::Decimal`
-- SQLite 中价格和数量按字符串写入
-
-这可以保留不同交易所之间不同的价格和数量精度。
+- SQLite 中价格、数量、OHLCV 都按字符串写入
 
 ## 已知边界
 
 - 当前没有自动历史归档策略
 - 当前没有 SQL migration versioning 机制，schema 直接通过 `CREATE TABLE IF NOT EXISTS` 初始化
 - 当前没有 HTTP 查询服务，查询主要通过 Rust API、CLI 和 SQLite 视图完成
+- 价格系统当前只保证 `trade` 历史 `1m` 回补为基线；`reference` 历史只在交易所官方支持时可回补

@@ -1,8 +1,12 @@
 # tokenresearch
 
-一个基于 Rust 的订单簿采集器，持续接入多个交易所的公开订单簿数据，并落地到本地 SQLite 数据库。
+一个基于 Rust 的本地市场数据采集工具集，当前包含三个二进制：
 
-当前实现的接入交易所：
+- `tokenresearch`：订单簿采集器
+- `pricecollector`：价格采集与历史回补器
+- `query`：统一查询 CLI
+
+当前接入交易所：
 
 - Binance USD-M perpetual
 - Hyperliquid perpetual
@@ -12,23 +16,22 @@
 
 - 统一使用 Rust 工具链实现采集、同步、存储和查询。
 - 三家交易所统一走官方 REST + WebSocket 协议，不依赖官方或半官方 Rust SDK。
-- Binance 使用完整本地簿同步模式：
+- 订单簿和价格系统分库落地，避免互相竞争 SQLite 写锁：
+  - `tokenresearch.sqlite`
+  - `token_prices.sqlite`
+- Binance 订单簿使用完整本地簿同步模式：
   - `wss` 接收 diff depth 增量
-  - `REST` 仅用于 market discovery 和按需 snapshot 重同步
-- Hyperliquid 和 Lighter 使用 `wss` 实时更新订单簿。
-- 订单簿数据落地到本地 SQLite，并启用 `WAL`。
-- runtime 采用单写者写库模型，避免多 market 并发写 SQLite 导致锁竞争。
-- 支持 gap 记录、epoch 切换、checkpoint 持久化和重启后恢复。
-- 提供 Rust 查询接口：
-  - `list_markets`
-  - `latest_book`
-  - `events`
-  - `snapshots`
-  - `gaps`
-  - `collector_state`
-  - `book_at`
-- 提供独立查询 CLI：`query`
-- 提供离线测试和在线 smoke 测试。
+  - `REST` 仅用于 discovery 和按需 snapshot 重同步
+- 价格系统同时采集两种口径：
+  - `trade`
+  - `reference`
+- 价格系统的保留策略：
+  - `1s` 实时样本保留最近 `30d`
+  - `1m` 历史 candle 长期保留
+- 两个 runtime 都采用单连接 SQLite + 串行提交的写入模型。
+- 支持 checkpoint、gap、epoch 和重启后恢复。
+- 提供 Rust 查询接口和统一查询 CLI。
+- 提供离线测试和 ignored 在线 smoke 测试。
 
 ## 快速开始
 
@@ -38,15 +41,19 @@
 cargo test
 ```
 
-在线 smoke 测试默认忽略，需要手动触发：
+订单簿在线 smoke：
 
 ```bash
 cargo test --test online_smoke -- --ignored --test-threads=1 --nocapture
 ```
 
-### 2. 启动采集器
+价格在线 smoke：
 
-使用示例配置：
+```bash
+cargo test --test price_online_smoke -- --ignored --test-threads=1 --nocapture
+```
+
+### 2. 启动订单簿采集器
 
 ```bash
 cargo run --release --bin tokenresearch -- config.toml.example
@@ -54,27 +61,39 @@ cargo run --release --bin tokenresearch -- config.toml.example
 
 如果没有提供配置文件，程序会尝试读取 `config.toml`；若不存在，则退回默认配置。
 
-由于仓库现在包含多个二进制：
+### 3. 启动价格采集器
+
+```bash
+cargo run --release --bin pricecollector -- price_config.toml.example
+```
+
+如果没有提供配置文件，程序会尝试读取 `price_config.toml`；若不存在，则退回默认配置。
+
+### 4. 默认输出
+
+- 订单簿数据库：`tokenresearch.sqlite`
+- 价格数据库：`token_prices.sqlite`
+- 日志：标准输出
+
+## 运行入口
+
+仓库当前包含三个二进制：
 
 - `tokenresearch`
+- `pricecollector`
 - `query`
 
-`Cargo.toml` 已经把默认运行入口设成了 `tokenresearch`，所以这条命令同样可用：
+`Cargo.toml` 里的默认运行入口仍然是 `tokenresearch`，所以这条命令也可用：
 
 ```bash
 cargo run --release -- config.toml.example
 ```
 
-### 3. 默认输出
-
-- SQLite 数据库：`tokenresearch.sqlite`
-- 日志：标准输出
-
 ## 配置项
 
-示例配置见 [config.toml.example](./config.toml.example)。
+订单簿示例配置见 [config.toml.example](/Users/welann/Documents/code/web3code/tokenresearch/config.toml.example)。
 
-当前支持的配置项：
+订单簿配置项：
 
 - `database_path`
 - `snapshot_every_events`
@@ -84,14 +103,25 @@ cargo run --release -- config.toml.example
 - `reconnect_backoff_ms`
 - `reconnect_backoff_cap_ms`
 
-## 查询接口
+价格示例配置见 [price_config.toml.example](/Users/welann/Documents/code/web3code/tokenresearch/price_config.toml.example)。
 
-当前查询能力提供两种使用方式：
+价格配置项：
+
+- `database_path`
+- `sample_retention_days`
+- `discovery_max_attempts`
+- `backfill_minutes_on_empty_start`
+- `restart_delay_ms`
+- `venues`
+
+## 查询 CLI
+
+查询能力提供两种使用方式：
 
 - Rust 库 API
 - 独立 CLI 二进制：`query`
 
-### CLI 用法
+### 订单簿命令
 
 `markets`，列出全部市场：
 
@@ -187,7 +217,79 @@ cargo run --bin query -- \
   --symbol BTC
 ```
 
-最小示例：
+### 价格命令
+
+价格子命令默认读取 `--price-db token_prices.sqlite`。
+
+`price-markets`，列出价格市场：
+
+```bash
+cargo run --bin query -- \
+  --price-db token_prices.sqlite \
+  price-markets
+```
+
+`price-latest`，查询某个 token 的最新价格：
+
+```bash
+cargo run --bin query -- \
+  --price-db token_prices.sqlite \
+  --json \
+  price-latest \
+  --token BTC \
+  --kind trade
+```
+
+`price-range`，查询某个 token 指定时间范围内的价格序列：
+
+```bash
+cargo run --bin query -- \
+  --price-db token_prices.sqlite \
+  --json \
+  price-range \
+  --token BTC \
+  --kind trade \
+  --start-ms 1767225600000 \
+  --end-ms 1768435200000 \
+  --resolution 1m
+```
+
+`price-range`，查询指定市场的高频价格：
+
+```bash
+cargo run --bin query -- \
+  --price-db token_prices.sqlite \
+  price-range \
+  --venue binance \
+  --symbol BTCUSDT \
+  --kind trade \
+  --start-ms 1768772400000 \
+  --end-ms 1768772460000 \
+  --resolution 1s
+```
+
+`price-gaps`，查询价格缺口：
+
+```bash
+cargo run --bin query -- \
+  --price-db token_prices.sqlite \
+  price-gaps \
+  --token BTC
+```
+
+`price-health`，查询价格流健康状态：
+
+```bash
+cargo run --bin query -- \
+  --price-db token_prices.sqlite \
+  --json \
+  price-health \
+  --venue binance \
+  --symbol BTCUSDT \
+  --kind trade
+```
+
+## Rust API 最小示例
 
 ```rust
 use tokenresearch::model::{MarketRef, Venue};
@@ -213,30 +315,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 ```mermaid
 flowchart LR
-    A["REST discovery / snapshot"] --> B["Venue adapters"]
+    A["REST discovery / snapshot / candles"] --> B["Venue adapters"]
     C["WebSocket streams"] --> B
-    B --> D["NormalizedBookEvent"]
-    D --> E["Sync layer"]
-    E --> F["In-memory OrderBook"]
-    E --> G["Single writer"]
-    G --> H["SQLite"]
-    H --> I["QueryStore"]
+    B --> D["NormalizedBookEvent / NormalizedPriceTick"]
+    D --> E["Sync + Aggregation"]
+    E --> F["In-memory OrderBook / PriceAggregator"]
+    E --> G["Single SQLite writer"]
+    G --> H["tokenresearch.sqlite / token_prices.sqlite"]
+    H --> I["QueryStore / PriceQueryStore"]
 ```
 
 ## 目录说明
 
 - `src/adapters`
-  - 三家交易所的协议适配层
+  - 订单簿协议适配层
+- `src/price_adapters`
+  - 价格协议适配层
 - `src/book.rs`
   - 纯内存订单簿状态机
-- `src/sync.rs`
-  - Binance 与通用交易所的同步逻辑
+- `src/price_runtime.rs`
+  - 价格 discovery、backfill、live 聚合与写库
 - `src/runtime.rs`
-  - 任务编排、重试、writer 队列、live 采集流程
+  - 订单簿任务编排、重试、writer 队列、live 采集流程
 - `src/storage.rs`
-  - SQLite schema 与持久化逻辑
+  - 订单簿 SQLite schema 与持久化逻辑
+- `src/price_storage.rs`
+  - 价格 SQLite schema 与持久化逻辑
 - `src/query.rs`
-  - Rust 查询接口
+  - 订单簿 Rust 查询接口
+- `src/price_query.rs`
+  - 价格 Rust 查询接口
 - `tests`
   - 单元测试、集成测试、在线 smoke
 - `docs`
@@ -244,19 +352,19 @@ flowchart LR
 
 ## 详细文档
 
-- [架构与设计](./docs/architecture.md)
-- [运行流程与异常恢复](./docs/runtime-flow.md)
-- [存储与查询说明](./docs/storage-query.md)
+- [架构与设计](/Users/welann/Documents/code/web3code/tokenresearch/docs/architecture.md)
+- [运行流程与异常恢复](/Users/welann/Documents/code/web3code/tokenresearch/docs/runtime-flow.md)
+- [价格采集与回补设计](/Users/welann/Documents/code/web3code/tokenresearch/docs/price-collector.md)
+- [存储与查询说明](/Users/welann/Documents/code/web3code/tokenresearch/docs/storage-query.md)
 
 ## 已知限制
 
 - Binance Futures 在某些网络出口下可能返回 `418`，这是交易所侧的访问限制，不是本地解析错误。
 - 某些网络环境可能对 `wss` 握手不稳定，表现为 `tls handshake eof`。
 - 当前没有内置 HTTP API。
-- Binance 的完整本地订单簿仍然需要按官方要求保留 REST snapshot 作为重同步锚点，不能纯靠 `wss` 实现完整簿。
+- Binance 的完整本地订单簿仍然需要保留 REST snapshot 作为重同步锚点。
+- 价格系统当前只把 `1m trade` 历史作为回补基线；`reference` 历史只在官方支持时补齐。
 
 ## 开发约束
 
 - 测试优先，先写测试再写实现。
-- 核心同步逻辑与状态机尽量保持纯逻辑，副作用集中在 runtime / storage。
-- 每个主要功能改动单独提交 git。

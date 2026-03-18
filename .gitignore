@@ -2,3 +2,6 @@
 tokenresearch.sqlite
 tokenresearch.sqlite-shm
 tokenresearch.sqlite-wal
+token_prices.sqlite
+token_prices.sqlite-shm
+token_prices.sqlite-wal

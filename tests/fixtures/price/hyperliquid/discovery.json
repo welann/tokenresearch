@@ -1,0 +1,5 @@
+{
+  "universe": [
+    { "name": "BTC", "szDecimals": 3, "isDelisted": false }
+  ]
+}

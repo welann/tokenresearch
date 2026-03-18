@@ -1,0 +1,6 @@
+{
+  "candles": [
+    {"open_time":1710000000000,"close_time":1710000059999,"open":"62000.0","high":"62020.0","low":"61980.0","close":"62010.0","volume":"7.5","trade_count":4},
+    {"open_time":1710000060000,"close_time":1710000119999,"open":"62010.0","high":"62035.0","low":"62000.0","close":"62030.0","volume":"6.1","trade_count":3}
+  ]
+}
