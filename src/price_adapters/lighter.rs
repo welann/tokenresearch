@@ -114,19 +114,8 @@ impl PriceVenueAdapter for LighterPriceAdapter {
         "wss://mainnet.zklighter.elliot.ai/stream?readonly=true".to_string()
     }
 
-    fn subscription_messages(&self, markets: &[PriceMarket]) -> Vec<String> {
-        let mut messages = Vec::new();
-        for market in markets {
-            messages.push(
-                json!({"type":"subscribe","channel": format!("trade/{}", market.venue_market_id)})
-                    .to_string(),
-            );
-            messages.push(
-                json!({"type":"subscribe","channel": format!("market_stats/{}", market.venue_market_id)})
-                    .to_string(),
-            );
-        }
-        messages
+    fn subscription_messages(&self, _markets: &[PriceMarket]) -> Vec<String> {
+        vec![json!({"type":"subscribe","channel":"market_stats/all"}).to_string()]
     }
 
     fn parse_ws_message(
@@ -134,10 +123,37 @@ impl PriceVenueAdapter for LighterPriceAdapter {
         raw: &str,
         received_ts_ms: i64,
     ) -> Result<Option<NormalizedPriceTick>, AdapterError> {
+        Ok(self
+            .parse_ws_message_ticks(raw, received_ts_ms)?
+            .into_iter()
+            .next())
+    }
+
+    fn parse_ws_message_ticks(
+        &self,
+        raw: &str,
+        received_ts_ms: i64,
+    ) -> Result<Vec<NormalizedPriceTick>, AdapterError> {
         let parsed: Value = serde_json::from_str(raw)?;
+        if let Some(error) = parsed.get("error") {
+            let code = error
+                .get("code")
+                .and_then(Value::as_i64)
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let message = error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            return Err(AdapterError::Unsupported(format!(
+                "server error code={} message={}",
+                code, message
+            )));
+        }
+
         match parsed.get("type").and_then(Value::as_str) {
-            Some("connected" | "subscribed" | "pong") => return Ok(None),
-            Some("trade") | Some("market_stats") => {}
+            Some("connected" | "subscribed" | "pong") => return Ok(Vec::new()),
+            Some("trade" | "market_stats" | "update/market_stats") => {}
             _ => {}
         }
 
@@ -163,63 +179,70 @@ impl PriceVenueAdapter for LighterPriceAdapter {
             .or_else(|| Self::parse_market_id(parsed.get("market_id")))
             .or_else(|| Self::channel_market_id(parsed.get("channel")))
             .ok_or(AdapterError::MissingField("market_id"))?;
-        let symbol = self
-            .symbol_by_market_id
-            .read()
-            .expect("rwlock poisoned")
-            .get(&market_id)
-            .cloned()
-            .unwrap_or(market_id);
+        let symbol = market_stats_payload
+            .get("symbol")
+            .and_then(Value::as_str)
+            .or_else(|| trade_payload.get("symbol").and_then(Value::as_str))
+            .map(ToString::to_string)
+            .or_else(|| {
+                self.symbol_by_market_id
+                    .read()
+                    .expect("rwlock poisoned")
+                    .get(&market_id)
+                    .cloned()
+            })
+            .unwrap_or_else(|| market_id.clone());
+        let exchange_ts_ms = parsed
+            .get("timestamp")
+            .and_then(Value::as_i64)
+            .or_else(|| {
+                market_stats_payload
+                    .get("timestamp")
+                    .and_then(Value::as_i64)
+            })
+            .or_else(|| {
+                trade_payload
+                    .get("timestamp")
+                    .and_then(Value::as_i64)
+                    .map(|value| value * 1_000)
+            });
 
-        if market_stats_payload.get("mid_price").is_some()
-            || market_stats_payload.get("mark_price").is_some()
+        let mut ticks = Vec::new();
+        if let Some(price) = market_stats_payload
+            .get("last_trade_price")
+            .or_else(|| trade_payload.get("price"))
         {
-            return Ok(Some(NormalizedPriceTick {
-                market: MarketRef::new(Venue::Lighter, symbol),
-                kind: PriceKind::Reference,
-                exchange_ts_ms: market_stats_payload
-                    .get("timestamp")
-                    .and_then(Value::as_i64)
-                    .map(|value| value * 1_000)
-                    .or_else(|| parsed.get("timestamp").and_then(Value::as_i64)),
-                received_ts_ms,
-                price: decimal_from_value(
-                    market_stats_payload
-                        .get("mid_price")
-                        .or_else(|| market_stats_payload.get("mark_price"))
-                        .ok_or(AdapterError::MissingField("mid_price"))?,
-                    "mid_price",
-                )?,
-                quantity: None,
-                raw_payload: parsed,
-            }));
-        }
-
-        if trade_payload.get("price").is_some() {
-            return Ok(Some(NormalizedPriceTick {
-                market: MarketRef::new(Venue::Lighter, symbol),
+            ticks.push(NormalizedPriceTick {
+                market: MarketRef::new(Venue::Lighter, symbol.clone()),
                 kind: PriceKind::Trade,
-                exchange_ts_ms: trade_payload
-                    .get("timestamp")
-                    .and_then(Value::as_i64)
-                    .map(|value| value * 1_000)
-                    .or_else(|| parsed.get("timestamp").and_then(Value::as_i64)),
+                exchange_ts_ms,
                 received_ts_ms,
-                price: decimal_from_value(
-                    trade_payload
-                        .get("price")
-                        .ok_or(AdapterError::MissingField("price"))?,
-                    "price",
-                )?,
+                price: decimal_from_value(price, "last_trade_price")?,
                 quantity: trade_payload
                     .get("size")
                     .map(|value| decimal_from_value(value, "size"))
                     .transpose()?,
-                raw_payload: parsed,
-            }));
+                raw_payload: parsed.clone(),
+            });
         }
 
-        Ok(None)
+        if let Some(price) = market_stats_payload
+            .get("mark_price")
+            .or_else(|| market_stats_payload.get("mid_price"))
+            .or_else(|| market_stats_payload.get("index_price"))
+        {
+            ticks.push(NormalizedPriceTick {
+                market: MarketRef::new(Venue::Lighter, symbol),
+                kind: PriceKind::Reference,
+                exchange_ts_ms,
+                received_ts_ms,
+                price: decimal_from_value(price, "mark_price")?,
+                quantity: None,
+                raw_payload: parsed,
+            });
+        }
+
+        Ok(ticks)
     }
 
     fn history_request(&self, request: PriceHistoryRequest) -> Option<DiscoveryRequest> {

@@ -25,6 +25,16 @@ pub trait PriceVenueAdapter: Send + Sync {
         raw: &str,
         received_ts_ms: i64,
     ) -> Result<Option<NormalizedPriceTick>, AdapterError>;
+    fn parse_ws_message_ticks(
+        &self,
+        raw: &str,
+        received_ts_ms: i64,
+    ) -> Result<Vec<NormalizedPriceTick>, AdapterError> {
+        Ok(self
+            .parse_ws_message(raw, received_ts_ms)?
+            .into_iter()
+            .collect())
+    }
     fn history_request(&self, request: PriceHistoryRequest) -> Option<DiscoveryRequest>;
     fn parse_history_candles(
         &self,

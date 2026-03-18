@@ -590,54 +590,62 @@ where
             error,
         ))
     })? {
-        match adapter.parse_ws_message(&raw, clock.now_ms()) {
-            Ok(Some(tick)) => {
-                let epoch_id = match epoch_by_key.get(&(tick.market.symbol.clone(), tick.kind)) {
-                    Some(epoch_id) => *epoch_id,
-                    None => {
-                        let epoch_id = store
-                            .open_price_epoch(run_id, &tick.market, tick.kind, 1, clock.now_ms())
-                            .await?;
-                        epoch_by_key.insert((tick.market.symbol.clone(), tick.kind), epoch_id);
-                        epoch_id
-                    }
-                };
+        match adapter.parse_ws_message_ticks(&raw, clock.now_ms()) {
+            Ok(ticks) => {
+                for tick in ticks {
+                    let epoch_id = match epoch_by_key.get(&(tick.market.symbol.clone(), tick.kind))
+                    {
+                        Some(epoch_id) => *epoch_id,
+                        None => {
+                            let epoch_id = store
+                                .open_price_epoch(
+                                    run_id,
+                                    &tick.market,
+                                    tick.kind,
+                                    1,
+                                    clock.now_ms(),
+                                )
+                                .await?;
+                            epoch_by_key.insert((tick.market.symbol.clone(), tick.kind), epoch_id);
+                            epoch_id
+                        }
+                    };
 
-                let aggregator = aggregator_by_key
-                    .entry((tick.market.symbol.clone(), tick.kind))
-                    .or_default();
-                let (samples, candles) = aggregator.apply_tick(&tick);
-                let checkpoint = PriceCheckpoint {
-                    market: tick.market.clone(),
-                    kind: tick.kind,
-                    epoch_id,
-                    last_live_bucket_ms: Some(
-                        (tick.received_ts_ms / ONE_SECOND_MS) * ONE_SECOND_MS,
-                    ),
-                    last_candle_open_ms: Some(
-                        (tick.received_ts_ms / ONE_MINUTE_MS) * ONE_MINUTE_MS,
-                    ),
-                    last_backfill_open_ms: store
-                        .load_price_checkpoint(&tick.market, tick.kind)
-                        .await?
-                        .and_then(|value| value.last_backfill_open_ms),
-                    last_exchange_ts_ms: tick.exchange_ts_ms,
-                    updated_at_ms: clock.now_ms(),
-                    status: "live".to_string(),
-                };
-                store
-                    .commit_price_batch(PriceCommitBatch {
+                    let aggregator = aggregator_by_key
+                        .entry((tick.market.symbol.clone(), tick.kind))
+                        .or_default();
+                    let (samples, candles) = aggregator.apply_tick(&tick);
+                    let checkpoint = PriceCheckpoint {
                         market: tick.market.clone(),
                         kind: tick.kind,
-                        epoch_id: Some(epoch_id),
-                        samples_1s: samples,
-                        candles_1m: candles,
-                        checkpoint: Some(checkpoint),
-                        gaps: Vec::new(),
-                    })
-                    .await?;
+                        epoch_id,
+                        last_live_bucket_ms: Some(
+                            (tick.received_ts_ms / ONE_SECOND_MS) * ONE_SECOND_MS,
+                        ),
+                        last_candle_open_ms: Some(
+                            (tick.received_ts_ms / ONE_MINUTE_MS) * ONE_MINUTE_MS,
+                        ),
+                        last_backfill_open_ms: store
+                            .load_price_checkpoint(&tick.market, tick.kind)
+                            .await?
+                            .and_then(|value| value.last_backfill_open_ms),
+                        last_exchange_ts_ms: tick.exchange_ts_ms,
+                        updated_at_ms: clock.now_ms(),
+                        status: "live".to_string(),
+                    };
+                    store
+                        .commit_price_batch(PriceCommitBatch {
+                            market: tick.market.clone(),
+                            kind: tick.kind,
+                            epoch_id: Some(epoch_id),
+                            samples_1s: samples,
+                            candles_1m: candles,
+                            checkpoint: Some(checkpoint),
+                            gaps: Vec::new(),
+                        })
+                        .await?;
+                }
             }
-            Ok(None) => {}
             Err(error) => {
                 warn!(
                     venue = %adapter.venue(),

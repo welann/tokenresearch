@@ -1,0 +1,24 @@
+{
+  "channel": "market_stats:57",
+  "market_stats": {
+    "symbol": "BTC",
+    "market_id": 57,
+    "index_price": "62011.8",
+    "mark_price": "62012.5",
+    "last_trade_price": "62010.1",
+    "open_interest": "100",
+    "open_interest_limit": "1000",
+    "funding_clamp_small": "0",
+    "funding_clamp_big": "0",
+    "current_funding_rate": "0.0001",
+    "funding_rate": "0.0001",
+    "funding_timestamp": 1710000000,
+    "daily_base_token_volume": 100.0,
+    "daily_quote_token_volume": 6200000.0,
+    "daily_price_low": 61000.0,
+    "daily_price_high": 63000.0,
+    "daily_price_change": 12.3
+  },
+  "timestamp": 1710000000123,
+  "type": "update/market_stats"
+}

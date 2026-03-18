@@ -121,6 +121,10 @@ fn lighter_price_adapter_parses_trade_reference_and_ignores_control_frames() {
     assert_eq!(markets.len(), 1);
     assert_eq!(markets[0].market.symbol, "BTC");
     assert!(!markets[0].supports_reference_history);
+    assert_eq!(
+        adapter.subscription_messages(&markets),
+        vec![r#"{"channel":"market_stats/all","type":"subscribe"}"#.to_string()]
+    );
 
     assert!(
         adapter
@@ -152,6 +156,18 @@ fn lighter_price_adapter_parses_trade_reference_and_ignores_control_frames() {
     assert_eq!(reference_tick.kind, PriceKind::Reference);
     assert_eq!(reference_tick.price.to_string(), "62012.5");
 
+    let market_stats_ticks = adapter
+        .parse_ws_message_ticks(
+            &common::fixture("price/lighter/ws_market_stats_all.json"),
+            1_710_000_005_800,
+        )
+        .expect("market stats ticks");
+    assert_eq!(market_stats_ticks.len(), 2);
+    assert_eq!(market_stats_ticks[0].kind, PriceKind::Trade);
+    assert_eq!(market_stats_ticks[0].price.to_string(), "62010.1");
+    assert_eq!(market_stats_ticks[1].kind, PriceKind::Reference);
+    assert_eq!(market_stats_ticks[1].price.to_string(), "62012.5");
+
     let candles = adapter
         .parse_history_candles(
             &markets[0],
@@ -161,6 +177,23 @@ fn lighter_price_adapter_parses_trade_reference_and_ignores_control_frames() {
         .expect("candles");
     assert_eq!(candles.len(), 2);
     assert_eq!(candles[0].low.to_string(), "61980.0");
+}
+
+#[test]
+fn lighter_price_adapter_surfaces_subscription_errors_clearly() {
+    let adapter = LighterPriceAdapter::default();
+    let error = adapter
+        .parse_ws_message(
+            r#"{"error":{"code":23001,"message":"Too Many Subscriptions!"}}"#,
+            1_710_000_006_000,
+        )
+        .expect_err("error frame should not be treated as data");
+
+    assert!(
+        error
+            .to_string()
+            .contains("server error code=23001 message=Too Many Subscriptions!")
+    );
 }
 
 #[test]
