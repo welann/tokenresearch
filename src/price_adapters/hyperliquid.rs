@@ -90,38 +90,51 @@ impl PriceVenueAdapter for HyperliquidPriceAdapter {
         raw: &str,
         received_ts_ms: i64,
     ) -> Result<Option<NormalizedPriceTick>, AdapterError> {
+        Ok(self
+            .parse_ws_message_ticks(raw, received_ts_ms)?
+            .into_iter()
+            .next())
+    }
+
+    fn parse_ws_message_ticks(
+        &self,
+        raw: &str,
+        received_ts_ms: i64,
+    ) -> Result<Vec<NormalizedPriceTick>, AdapterError> {
         let parsed: Value = serde_json::from_str(raw)?;
         match parsed.get("channel").and_then(Value::as_str) {
-            Some("subscriptionResponse" | "pong") => Ok(None),
+            Some("subscriptionResponse" | "pong") => Ok(Vec::new()),
             Some("trades") => {
                 let trades = parsed
                     .get("data")
                     .and_then(Value::as_array)
                     .ok_or(AdapterError::MissingField("data"))?;
-                let first = trades
-                    .first()
-                    .ok_or(AdapterError::MissingField("data[0]"))?;
-                Ok(Some(NormalizedPriceTick {
-                    market: MarketRef::new(
-                        Venue::Hyperliquid,
-                        first
-                            .get("coin")
-                            .and_then(Value::as_str)
-                            .ok_or(AdapterError::MissingField("coin"))?,
-                    ),
-                    kind: PriceKind::Trade,
-                    exchange_ts_ms: first.get("time").and_then(Value::as_i64),
-                    received_ts_ms,
-                    price: decimal_from_value(
-                        first.get("px").ok_or(AdapterError::MissingField("px"))?,
-                        "px",
-                    )?,
-                    quantity: Some(decimal_from_value(
-                        first.get("sz").ok_or(AdapterError::MissingField("sz"))?,
-                        "sz",
-                    )?),
-                    raw_payload: parsed,
-                }))
+                trades
+                    .iter()
+                    .map(|trade| {
+                        Ok(NormalizedPriceTick {
+                            market: MarketRef::new(
+                                Venue::Hyperliquid,
+                                trade
+                                    .get("coin")
+                                    .and_then(Value::as_str)
+                                    .ok_or(AdapterError::MissingField("coin"))?,
+                            ),
+                            kind: PriceKind::Trade,
+                            exchange_ts_ms: trade.get("time").and_then(Value::as_i64),
+                            received_ts_ms,
+                            price: decimal_from_value(
+                                trade.get("px").ok_or(AdapterError::MissingField("px"))?,
+                                "px",
+                            )?,
+                            quantity: Some(decimal_from_value(
+                                trade.get("sz").ok_or(AdapterError::MissingField("sz"))?,
+                                "sz",
+                            )?),
+                            raw_payload: parsed.clone(),
+                        })
+                    })
+                    .collect()
             }
             Some("allMids") => {
                 let data = parsed
@@ -131,21 +144,21 @@ impl PriceVenueAdapter for HyperliquidPriceAdapter {
                     .get("mids")
                     .and_then(Value::as_object)
                     .ok_or(AdapterError::MissingField("mids"))?;
-                let (coin, price) = mids
-                    .iter()
-                    .next()
-                    .ok_or(AdapterError::MissingField("mids.BTC"))?;
-                Ok(Some(NormalizedPriceTick {
-                    market: MarketRef::new(Venue::Hyperliquid, coin),
-                    kind: PriceKind::Reference,
-                    exchange_ts_ms: data.get("time").and_then(Value::as_i64),
-                    received_ts_ms,
-                    price: decimal_from_value(price, "mid")?,
-                    quantity: None,
-                    raw_payload: parsed,
-                }))
+                mids.iter()
+                    .map(|(coin, price)| {
+                        Ok(NormalizedPriceTick {
+                            market: MarketRef::new(Venue::Hyperliquid, coin),
+                            kind: PriceKind::Reference,
+                            exchange_ts_ms: data.get("time").and_then(Value::as_i64),
+                            received_ts_ms,
+                            price: decimal_from_value(price, "mid")?,
+                            quantity: None,
+                            raw_payload: parsed.clone(),
+                        })
+                    })
+                    .collect()
             }
-            _ => Ok(None),
+            _ => Ok(Vec::new()),
         }
     }
 

@@ -89,6 +89,18 @@ fn hyperliquid_price_adapter_parses_trade_reference_and_candles() {
     assert_eq!(reference_tick.kind, PriceKind::Reference);
     assert_eq!(reference_tick.price.to_string(), "62011.0");
 
+    let reference_ticks = adapter
+        .parse_ws_message_ticks(
+            &common::fixture("price/hyperliquid/ws_reference.json"),
+            1_710_000_003_500,
+        )
+        .expect("reference ticks");
+    assert_eq!(reference_ticks.len(), 2);
+    assert_eq!(reference_ticks[0].market.symbol, "BTC");
+    assert_eq!(reference_ticks[0].price.to_string(), "62011.0");
+    assert_eq!(reference_ticks[1].market.symbol, "ETH");
+    assert_eq!(reference_ticks[1].price.to_string(), "3100.0");
+
     let candles = adapter
         .parse_history_candles(
             &markets[0],
