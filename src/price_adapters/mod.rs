@@ -49,8 +49,10 @@ fn decimal_from_value(
         });
     };
 
-    raw.parse().map_err(|error| AdapterError::InvalidField {
-        field,
-        message: format!("decimal parse failed: {error}"),
-    })
+    raw.parse()
+        .or_else(|_| rust_decimal::Decimal::from_scientific(&raw))
+        .map_err(|error| AdapterError::InvalidField {
+            field,
+            message: format!("decimal parse failed: {error}"),
+        })
 }

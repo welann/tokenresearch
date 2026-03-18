@@ -162,3 +162,22 @@ fn lighter_price_adapter_parses_trade_reference_and_ignores_control_frames() {
     assert_eq!(candles.len(), 2);
     assert_eq!(candles[0].low.to_string(), "61980.0");
 }
+
+#[test]
+fn lighter_price_adapter_accepts_scientific_notation_in_candle_volume() {
+    let adapter = LighterPriceAdapter::default();
+    let markets = adapter
+        .discover_markets(&common::fixture("price/lighter/discovery.json"))
+        .expect("markets");
+
+    let candles = adapter
+        .parse_history_candles(
+            &markets[0],
+            PriceKind::Trade,
+            r#"{"c":[{"t":1710000000000,"o":"62000.0","h":"62020.0","l":"61980.0","c":"62010.0","v":1e-7}]}"#,
+        )
+        .expect("candles");
+
+    assert_eq!(candles.len(), 1);
+    assert_eq!(candles[0].volume.to_string(), "0.0000001");
+}
