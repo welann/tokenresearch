@@ -111,7 +111,7 @@ async fn runtime_bootstraps_and_persists_live_prices() {
 
     let ws = FakeWsClient::default();
     ws.messages_by_url.lock().expect("ws").insert(
-        "wss://fstream.binance.com/ws".to_string(),
+        "wss://fstream.binance.com/stream?streams=!ticker@arr/!markPrice@arr@1s".to_string(),
         VecDeque::from(vec![
             common::fixture("price/binance/ws_trade.json"),
             common::fixture("price/binance/ws_reference.json"),
@@ -169,7 +169,7 @@ async fn runtime_processes_multiple_venues_without_blocking_on_first_stream() {
 
     let ws = FakeWsClient::default();
     ws.messages_by_url.lock().expect("ws").insert(
-        "wss://fstream.binance.com/ws".to_string(),
+        "wss://fstream.binance.com/stream?streams=!ticker@arr/!markPrice@arr@1s".to_string(),
         VecDeque::from(vec![
             common::fixture("price/binance/ws_trade.json"),
             common::fixture("price/binance/ws_reference.json"),
@@ -290,7 +290,7 @@ async fn runtime_backfills_large_windows_in_pages() {
 
     let ws = FakeWsClient::default();
     ws.messages_by_url.lock().expect("ws").insert(
-        "wss://fstream.binance.com/ws".to_string(),
+        "wss://fstream.binance.com/stream?streams=!ticker@arr/!markPrice@arr@1s".to_string(),
         VecDeque::from(vec![common::fixture("price/binance/ws_trade.json")]),
     );
 
@@ -344,7 +344,7 @@ async fn runtime_continues_live_after_backfill_failure_and_records_gap() {
 
     let ws = FakeWsClient::default();
     ws.messages_by_url.lock().expect("ws").insert(
-        "wss://fstream.binance.com/ws".to_string(),
+        "wss://fstream.binance.com/stream?streams=!ticker@arr/!markPrice@arr@1s".to_string(),
         VecDeque::from(vec![
             common::fixture("price/binance/ws_trade.json"),
             common::fixture("price/binance/ws_reference.json"),

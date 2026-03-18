@@ -16,6 +16,11 @@ fn binance_price_adapter_parses_markets_ticks_and_history() {
     assert_eq!(markets[0].market.symbol, "BTCUSDT");
     assert_eq!(markets[0].status, MarketStatus::Active);
     assert!(markets[0].supports_reference_history);
+    assert_eq!(adapter.subscription_messages(&markets), Vec::<String>::new());
+    assert_eq!(
+        adapter.ws_url(),
+        "wss://fstream.binance.com/stream?streams=!ticker@arr/!markPrice@arr@1s"
+    );
 
     let trade_tick = adapter
         .parse_ws_message(
@@ -37,6 +42,30 @@ fn binance_price_adapter_parses_markets_ticks_and_history() {
         .expect("reference tick should exist");
     assert_eq!(reference_tick.kind, PriceKind::Reference);
     assert_eq!(reference_tick.price.to_string(), "62001.0");
+
+    let trade_ticks = adapter
+        .parse_ws_message_ticks(
+            &common::fixture("price/binance/ws_trade_all.json"),
+            1_710_000_000_500,
+        )
+        .expect("trade ticks");
+    assert_eq!(trade_ticks.len(), 2);
+    assert_eq!(trade_ticks[0].market.symbol, "BTCUSDT");
+    assert_eq!(trade_ticks[0].price.to_string(), "62000.1");
+    assert_eq!(trade_ticks[1].market.symbol, "ETHUSDT");
+    assert_eq!(trade_ticks[1].price.to_string(), "3100.5");
+
+    let reference_ticks = adapter
+        .parse_ws_message_ticks(
+            &common::fixture("price/binance/ws_reference_all.json"),
+            1_710_000_001_500,
+        )
+        .expect("reference ticks");
+    assert_eq!(reference_ticks.len(), 2);
+    assert_eq!(reference_ticks[0].kind, PriceKind::Reference);
+    assert_eq!(reference_ticks[0].market.symbol, "BTCUSDT");
+    assert_eq!(reference_ticks[1].market.symbol, "ETHUSDT");
+    assert_eq!(reference_ticks[1].price.to_string(), "3101.0");
 
     let trade_candles = adapter
         .parse_history_candles(

@@ -1,4 +1,4 @@
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::adapters::{AdapterError, DiscoveryRequest, HttpMethod};
 use crate::model::{MarketRef, MarketStatus, Venue};
@@ -11,6 +11,88 @@ use crate::price_model::{
 pub struct BinancePriceAdapter;
 
 impl BinancePriceAdapter {
+    fn parse_trade_tick(
+        payload: &Value,
+        raw_payload: Value,
+        received_ts_ms: i64,
+    ) -> Result<NormalizedPriceTick, AdapterError> {
+        let quantity_field = if payload.get("q").is_some() { "q" } else { "Q" };
+        let quantity = payload
+            .get(quantity_field)
+            .map(|value| decimal_from_value(value, quantity_field))
+            .transpose()?;
+
+        Ok(NormalizedPriceTick {
+            market: MarketRef::new(
+                Venue::Binance,
+                payload
+                    .get("s")
+                    .and_then(Value::as_str)
+                    .ok_or(AdapterError::MissingField("s"))?,
+            ),
+            kind: PriceKind::Trade,
+            exchange_ts_ms: payload
+                .get("T")
+                .and_then(Value::as_i64)
+                .or_else(|| payload.get("E").and_then(Value::as_i64)),
+            received_ts_ms,
+            price: decimal_from_value(
+                payload
+                    .get("p")
+                    .or_else(|| payload.get("c"))
+                    .ok_or(AdapterError::MissingField("p"))?,
+                "p",
+            )?,
+            quantity,
+            raw_payload,
+        })
+    }
+
+    fn parse_reference_tick(
+        payload: &Value,
+        raw_payload: Value,
+        received_ts_ms: i64,
+    ) -> Result<NormalizedPriceTick, AdapterError> {
+        Ok(NormalizedPriceTick {
+            market: MarketRef::new(
+                Venue::Binance,
+                payload
+                    .get("s")
+                    .and_then(Value::as_str)
+                    .ok_or(AdapterError::MissingField("s"))?,
+            ),
+            kind: PriceKind::Reference,
+            exchange_ts_ms: payload.get("E").and_then(Value::as_i64),
+            received_ts_ms,
+            price: decimal_from_value(
+                payload
+                    .get("p")
+                    .ok_or(AdapterError::MissingField("p"))?,
+                "p",
+            )?,
+            quantity: None,
+            raw_payload,
+        })
+    }
+
+    fn parse_event(
+        payload: &Value,
+        raw_payload: Value,
+        received_ts_ms: i64,
+    ) -> Result<Option<NormalizedPriceTick>, AdapterError> {
+        match payload.get("e").and_then(Value::as_str) {
+            Some("aggTrade") | Some("24hrTicker") | Some("24hrMiniTicker") => Ok(Some(
+                Self::parse_trade_tick(payload, raw_payload, received_ts_ms)?,
+            )),
+            Some("markPriceUpdate") => Ok(Some(Self::parse_reference_tick(
+                payload,
+                raw_payload,
+                received_ts_ms,
+            )?)),
+            _ => Ok(None),
+        }
+    }
+
     fn parse_market(symbol: &Value) -> Result<Option<PriceMarket>, AdapterError> {
         let symbol_name = symbol
             .get("symbol")
@@ -143,26 +225,11 @@ impl PriceVenueAdapter for BinancePriceAdapter {
     }
 
     fn ws_url(&self) -> String {
-        "wss://fstream.binance.com/ws".to_string()
+        "wss://fstream.binance.com/stream?streams=!ticker@arr/!markPrice@arr@1s".to_string()
     }
 
-    fn subscription_messages(&self, markets: &[PriceMarket]) -> Vec<String> {
-        let mut params = Vec::new();
-        for market in markets {
-            params.push(format!("{}@aggTrade", market.market.symbol.to_lowercase()));
-            params.push(format!(
-                "{}@markPrice@1s",
-                market.market.symbol.to_lowercase()
-            ));
-        }
-        vec![
-            json!({
-                "method": "SUBSCRIBE",
-                "params": params,
-                "id": 1,
-            })
-            .to_string(),
-        ]
+    fn subscription_messages(&self, _markets: &[PriceMarket]) -> Vec<String> {
+        Vec::new()
     }
 
     fn parse_ws_message(
@@ -170,49 +237,37 @@ impl PriceVenueAdapter for BinancePriceAdapter {
         raw: &str,
         received_ts_ms: i64,
     ) -> Result<Option<NormalizedPriceTick>, AdapterError> {
+        Ok(self
+            .parse_ws_message_ticks(raw, received_ts_ms)?
+            .into_iter()
+            .next())
+    }
+
+    fn parse_ws_message_ticks(
+        &self,
+        raw: &str,
+        received_ts_ms: i64,
+    ) -> Result<Vec<NormalizedPriceTick>, AdapterError> {
         let parsed: Value = serde_json::from_str(raw)?;
-        let data = parsed.get("data").unwrap_or(&parsed);
-        match data.get("e").and_then(Value::as_str) {
-            Some("aggTrade") => Ok(Some(NormalizedPriceTick {
-                market: MarketRef::new(
-                    Venue::Binance,
-                    data.get("s")
-                        .and_then(Value::as_str)
-                        .ok_or(AdapterError::MissingField("s"))?,
-                ),
-                kind: PriceKind::Trade,
-                exchange_ts_ms: data.get("T").and_then(Value::as_i64),
-                received_ts_ms,
-                price: decimal_from_value(
-                    data.get("p").ok_or(AdapterError::MissingField("p"))?,
-                    "p",
-                )?,
-                quantity: Some(decimal_from_value(
-                    data.get("q").ok_or(AdapterError::MissingField("q"))?,
-                    "q",
-                )?),
-                raw_payload: parsed,
-            })),
-            Some("markPriceUpdate") => Ok(Some(NormalizedPriceTick {
-                market: MarketRef::new(
-                    Venue::Binance,
-                    data.get("s")
-                        .and_then(Value::as_str)
-                        .ok_or(AdapterError::MissingField("s"))?,
-                ),
-                kind: PriceKind::Reference,
-                exchange_ts_ms: data.get("E").and_then(Value::as_i64),
-                received_ts_ms,
-                price: decimal_from_value(
-                    data.get("p").ok_or(AdapterError::MissingField("p"))?,
-                    "p",
-                )?,
-                quantity: None,
-                raw_payload: parsed,
-            })),
-            Some("result") | None if parsed.get("result").is_some() => Ok(None),
-            _ => Ok(None),
+        if parsed.get("result").is_some() {
+            return Ok(Vec::new());
         }
+
+        let data = parsed.get("data").cloned().unwrap_or_else(|| parsed.clone());
+        if let Some(events) = data.as_array() {
+            return events
+                .iter()
+                .filter_map(|event| {
+                    match Self::parse_event(event, event.clone(), received_ts_ms) {
+                        Ok(Some(tick)) => Some(Ok(tick)),
+                        Ok(None) => None,
+                        Err(error) => Some(Err(error)),
+                    }
+                })
+                .collect();
+        }
+
+        Self::parse_event(&data, parsed, received_ts_ms).map(|tick| tick.into_iter().collect())
     }
 
     fn history_request(&self, request: PriceHistoryRequest) -> Option<DiscoveryRequest> {
