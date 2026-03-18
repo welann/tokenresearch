@@ -16,7 +16,10 @@ fn binance_price_adapter_parses_markets_ticks_and_history() {
     assert_eq!(markets[0].market.symbol, "BTCUSDT");
     assert_eq!(markets[0].status, MarketStatus::Active);
     assert!(markets[0].supports_reference_history);
-    assert_eq!(adapter.subscription_messages(&markets), Vec::<String>::new());
+    assert_eq!(
+        adapter.subscription_messages(&markets),
+        Vec::<String>::new()
+    );
     assert_eq!(
         adapter.ws_url(),
         "wss://fstream.binance.com/stream?streams=!ticker@arr/!markPrice@arr@1s"
@@ -174,6 +177,12 @@ fn lighter_price_adapter_parses_trade_reference_and_ignores_control_frames() {
                 1_710_000_004_000
             )
             .expect("control")
+            .is_none()
+    );
+    assert!(
+        adapter
+            .parse_ws_message(r#"{"type":"ping"}"#, 1_710_000_004_100)
+            .expect("ping")
             .is_none()
     );
 

@@ -65,9 +65,7 @@ impl BinancePriceAdapter {
             exchange_ts_ms: payload.get("E").and_then(Value::as_i64),
             received_ts_ms,
             price: decimal_from_value(
-                payload
-                    .get("p")
-                    .ok_or(AdapterError::MissingField("p"))?,
+                payload.get("p").ok_or(AdapterError::MissingField("p"))?,
                 "p",
             )?,
             quantity: None,
@@ -253,17 +251,20 @@ impl PriceVenueAdapter for BinancePriceAdapter {
             return Ok(Vec::new());
         }
 
-        let data = parsed.get("data").cloned().unwrap_or_else(|| parsed.clone());
+        let data = parsed
+            .get("data")
+            .cloned()
+            .unwrap_or_else(|| parsed.clone());
         if let Some(events) = data.as_array() {
             return events
                 .iter()
-                .filter_map(|event| {
-                    match Self::parse_event(event, event.clone(), received_ts_ms) {
+                .filter_map(
+                    |event| match Self::parse_event(event, event.clone(), received_ts_ms) {
                         Ok(Some(tick)) => Some(Ok(tick)),
                         Ok(None) => None,
                         Err(error) => Some(Err(error)),
-                    }
-                })
+                    },
+                )
                 .collect();
         }
 

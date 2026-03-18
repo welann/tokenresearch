@@ -88,6 +88,41 @@ impl WsClient for FakeWsClient {
     }
 }
 
+#[derive(Clone, Default)]
+struct FakeSequencedRest {
+    clock: FakeClock,
+    gets: Arc<Mutex<HashMap<String, VecDeque<Result<String, String>>>>>,
+    get_times: Arc<Mutex<HashMap<String, Vec<i64>>>>,
+}
+
+#[async_trait]
+impl RestClient for FakeSequencedRest {
+    async fn get_text(&self, url: &str) -> DynResult<String> {
+        let now_ms = self.clock.now_ms();
+        self.get_times
+            .lock()
+            .expect("get_times")
+            .entry(url.to_string())
+            .or_default()
+            .push(now_ms);
+        let mut gets = self.gets.lock().expect("gets");
+        let responses = gets
+            .get_mut(url)
+            .ok_or_else(|| format!("missing GET response for {url}"))?;
+        match responses
+            .pop_front()
+            .ok_or_else(|| format!("missing queued GET response for {url}"))?
+        {
+            Ok(body) => Ok(body),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    async fn post_json_text(&self, _url: &str, _body: &Value) -> DynResult<String> {
+        Err("unexpected POST".into())
+    }
+}
+
 #[tokio::test]
 async fn runtime_bootstraps_and_persists_live_prices() {
     let dir = tempdir().expect("tempdir");
@@ -128,6 +163,7 @@ async fn runtime_bootstraps_and_persists_live_prices() {
             sample_retention_days: 30,
             discovery_max_attempts: 1,
             backfill_window_days: 0,
+            http_min_interval_ms: 0,
         },
         store.clone(),
         rest,
@@ -224,6 +260,7 @@ async fn runtime_processes_multiple_venues_without_blocking_on_first_stream() {
             sample_retention_days: 30,
             discovery_max_attempts: 1,
             backfill_window_days: 0,
+            http_min_interval_ms: 0,
         },
         store.clone(),
         rest,
@@ -300,6 +337,7 @@ async fn runtime_backfills_large_windows_in_pages() {
             sample_retention_days: 30,
             discovery_max_attempts: 1,
             backfill_window_days: 1,
+            http_min_interval_ms: 0,
         },
         store.clone(),
         rest,
@@ -357,6 +395,7 @@ async fn runtime_continues_live_after_backfill_failure_and_records_gap() {
             sample_retention_days: 30,
             discovery_max_attempts: 1,
             backfill_window_days: 1,
+            http_min_interval_ms: 0,
         },
         store.clone(),
         rest,
@@ -384,6 +423,62 @@ async fn runtime_continues_live_after_backfill_failure_and_records_gap() {
         gaps.iter()
             .any(|gap| gap.reason == "backfill_request_failed")
     );
+}
+
+#[tokio::test]
+async fn runtime_throttles_http_requests_per_venue() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("token_prices.sqlite");
+    let store = SqlitePriceStore::connect(&db_path).await.expect("connect");
+    store.init().await.expect("init");
+
+    let clock = FakeClock {
+        now_ms: Arc::new(Mutex::new(1_710_000_120_500)),
+    };
+    let rest = FakeSequencedRest {
+        clock: clock.clone(),
+        ..FakeSequencedRest::default()
+    };
+    rest.gets.lock().expect("gets").insert(
+        "https://fapi.binance.com/fapi/v1/exchangeInfo".to_string(),
+        VecDeque::from(vec![
+            Err("transient discovery failure".to_string()),
+            Ok(common::fixture("price/binance/discovery.json")),
+        ]),
+    );
+
+    let ws = FakeWsClient::default();
+    ws.messages_by_url.lock().expect("ws").insert(
+        "wss://fstream.binance.com/stream?streams=!ticker@arr/!markPrice@arr@1s".to_string(),
+        VecDeque::from(vec![common::fixture("price/binance/ws_trade.json")]),
+    );
+
+    run_price_runtime_once(
+        PriceRuntimeConfig {
+            database_path: db_path.display().to_string(),
+            sample_retention_days: 30,
+            discovery_max_attempts: 2,
+            backfill_window_days: 0,
+            http_min_interval_ms: 1_000,
+        },
+        store,
+        rest.clone(),
+        ws,
+        clock,
+        vec![Arc::new(BinancePriceAdapter::default()) as Arc<dyn PriceVenueAdapter>],
+    )
+    .await
+    .expect("runtime");
+
+    let request_times = rest
+        .get_times
+        .lock()
+        .expect("get_times")
+        .get("https://fapi.binance.com/fapi/v1/exchangeInfo")
+        .cloned()
+        .expect("times");
+    assert_eq!(request_times.len(), 2);
+    assert!(request_times[1] - request_times[0] >= 1_000);
 }
 
 #[derive(Clone)]

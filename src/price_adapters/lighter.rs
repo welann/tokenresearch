@@ -152,7 +152,7 @@ impl PriceVenueAdapter for LighterPriceAdapter {
         }
 
         match parsed.get("type").and_then(Value::as_str) {
-            Some("connected" | "subscribed" | "pong") => return Ok(Vec::new()),
+            Some("connected" | "subscribed" | "pong" | "ping") => return Ok(Vec::new()),
             Some("trade" | "market_stats" | "update/market_stats") => {}
             _ => {}
         }

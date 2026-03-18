@@ -31,6 +31,8 @@ pub struct PriceRuntimeConfig {
     pub discovery_max_attempts: usize,
     #[serde(default = "default_backfill_window_days")]
     pub backfill_window_days: i64,
+    #[serde(default = "default_http_min_interval_ms")]
+    pub http_min_interval_ms: u64,
 }
 
 fn default_price_db() -> String {
@@ -49,6 +51,10 @@ fn default_backfill_window_days() -> i64 {
     90
 }
 
+fn default_http_min_interval_ms() -> u64 {
+    1_000
+}
+
 impl Default for PriceRuntimeConfig {
     fn default() -> Self {
         Self {
@@ -56,6 +62,7 @@ impl Default for PriceRuntimeConfig {
             sample_retention_days: default_sample_retention_days(),
             discovery_max_attempts: default_discovery_max_attempts(),
             backfill_window_days: default_backfill_window_days(),
+            http_min_interval_ms: default_http_min_interval_ms(),
         }
     }
 }
@@ -71,6 +78,39 @@ pub enum BackfillDecision {
         reason: String,
     },
     Skip,
+}
+
+#[derive(Clone, Debug)]
+struct VenueHttpLimiter {
+    min_interval_ms: u64,
+    next_allowed_ms: Option<i64>,
+}
+
+impl VenueHttpLimiter {
+    fn new(min_interval_ms: u64) -> Self {
+        Self {
+            min_interval_ms,
+            next_allowed_ms: None,
+        }
+    }
+
+    async fn wait_turn<C>(&mut self, clock: &C)
+    where
+        C: Clock + Send + Sync,
+    {
+        if self.min_interval_ms == 0 {
+            return;
+        }
+        let now_ms = clock.now_ms();
+        if let Some(next_allowed_ms) = self.next_allowed_ms {
+            if now_ms < next_allowed_ms {
+                clock
+                    .sleep(Duration::from_millis((next_allowed_ms - now_ms) as u64))
+                    .await;
+            }
+        }
+        self.next_allowed_ms = Some(clock.now_ms() + self.min_interval_ms as i64);
+    }
 }
 
 pub fn plan_backfill(
@@ -327,13 +367,31 @@ where
         let clock = clock.clone();
         let config = config.clone();
         tasks.spawn(async move {
-            let markets =
-                discover_markets_with_retry(&store, &rest, &clock, &*adapter, &config).await?;
+            let mut http_limiter = VenueHttpLimiter::new(config.http_min_interval_ms);
+            let markets = discover_markets_with_retry(
+                &store,
+                &rest,
+                &clock,
+                &mut http_limiter,
+                &*adapter,
+                &config,
+            )
+            .await?;
             if markets.is_empty() {
                 return Ok(());
             }
 
-            backfill_markets(&store, &rest, &clock, &*adapter, &markets, &config, run_id).await?;
+            backfill_markets(
+                &store,
+                &rest,
+                &clock,
+                &mut http_limiter,
+                &*adapter,
+                &markets,
+                &config,
+                run_id,
+            )
+            .await?;
             live_once(&store, &ws, &clock, &*adapter, &markets, run_id).await
         });
     }
@@ -357,6 +415,7 @@ async fn discover_markets_with_retry<S, R, C>(
     store: &S,
     rest: &R,
     clock: &C,
+    http_limiter: &mut VenueHttpLimiter,
     adapter: &dyn PriceVenueAdapter,
     config: &PriceRuntimeConfig,
 ) -> DynResult<Vec<PriceMarket>>
@@ -376,6 +435,7 @@ where
         let request_method = http_method_name(request.method);
         let request_body = preview_optional_json(request.body.as_ref());
         let request_url = request.url.clone();
+        http_limiter.wait_turn(clock).await;
         let body = execute_request(rest, &request).await;
         match body {
             Ok(body) => {
@@ -423,6 +483,7 @@ async fn backfill_markets<S, R, C>(
     store: &S,
     rest: &R,
     clock: &C,
+    http_limiter: &mut VenueHttpLimiter,
     adapter: &dyn PriceVenueAdapter,
     markets: &[PriceMarket],
     config: &PriceRuntimeConfig,
@@ -502,6 +563,7 @@ where
                         let request_method = http_method_name(request.method);
                         let request_body = preview_optional_json(request.body.as_ref());
                         let request_url = request.url.clone();
+                        http_limiter.wait_turn(clock).await;
                         let body = match execute_request(rest, &request).await {
                             Ok(body) => body,
                             Err(error) => {

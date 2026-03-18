@@ -114,6 +114,10 @@ cargo run --release -- config.toml.example
   - 默认 `90`
   - 表示启动时会尝试补齐“从当前时间往前 N 天”的 `1m` 历史价格
   - 设为 `0` 可关闭历史回补，只保留 live websocket 价格采集
+- `http_min_interval_ms`
+  - 默认 `1000`
+  - 表示同一个交易所的价格 HTTP 请求最小间隔
+  - 当前会作用于 discovery、重试和历史回补
 - `restart_delay_ms`
 - `venues`
 
