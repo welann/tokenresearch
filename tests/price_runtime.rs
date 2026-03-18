@@ -10,7 +10,7 @@ use serde_json::Value;
 use tempfile::tempdir;
 use tokenresearch::model::Venue;
 use tokenresearch::price_adapters::{
-    BinancePriceAdapter, HyperliquidPriceAdapter, PriceVenueAdapter,
+    BinancePriceAdapter, HyperliquidPriceAdapter, LighterPriceAdapter, PriceVenueAdapter,
 };
 use tokenresearch::price_model::{PriceKind, PriceRangeRequest, PriceResolution};
 use tokenresearch::price_query::{PriceQueryStore, TimeRange};
@@ -612,6 +612,67 @@ async fn runtime_starts_live_before_backfill_requests() {
 
     assert!(ws_connected.load(Ordering::SeqCst));
     assert!(history_requested.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn lighter_runtime_can_start_live_without_discovery() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("token_prices.sqlite");
+    let store = SqlitePriceStore::connect(&db_path).await.expect("connect");
+    store.init().await.expect("init");
+
+    let rest = FakeSequencedRest {
+        clock: FakeClock {
+            now_ms: Arc::new(Mutex::new(1_710_000_120_500)),
+        },
+        gets: Arc::new(Mutex::new(HashMap::from([(
+            "https://mainnet.zklighter.elliot.ai/api/v1/orderBooks".to_string(),
+            VecDeque::from(vec![
+                Err("transport failure".to_string()),
+                Err("transport failure".to_string()),
+            ]),
+        )]))),
+        ..FakeSequencedRest::default()
+    };
+
+    let ws = FakeWsClient::default();
+    ws.messages_by_url.lock().expect("ws").insert(
+        "wss://mainnet.zklighter.elliot.ai/stream?readonly=true".to_string(),
+        VecDeque::from(vec![common::fixture("price/lighter/ws_market_stats_all.json")]),
+    );
+
+    run_price_runtime_once(
+        PriceRuntimeConfig {
+            database_path: db_path.display().to_string(),
+            sample_retention_days: 30,
+            discovery_max_attempts: 2,
+            backfill_window_days: 1,
+            http_min_interval_ms: 0,
+        },
+        store.clone(),
+        rest,
+        ws,
+        FakeClock {
+            now_ms: Arc::new(Mutex::new(1_710_000_120_500)),
+        },
+        vec![Arc::new(LighterPriceAdapter::default()) as Arc<dyn PriceVenueAdapter>],
+    )
+    .await
+    .expect("lighter live fallback");
+
+    let query = PriceQueryStore::new(store);
+    let latest = query
+        .latest_price("BTC", PriceKind::All, Some(Venue::Lighter), None)
+        .await
+        .expect("latest");
+    assert_eq!(latest.len(), 2);
+
+    let markets = query
+        .list_price_markets(Some(Venue::Lighter))
+        .await
+        .expect("markets");
+    assert_eq!(markets.len(), 1);
+    assert_eq!(markets[0].venue_market_id, "57");
 }
 
 #[derive(Clone)]

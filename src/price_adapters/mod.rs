@@ -42,6 +42,12 @@ pub trait PriceVenueAdapter: Send + Sync {
         kind: crate::price_model::PriceKind,
         body: &str,
     ) -> Result<Vec<PriceCandle1m>, AdapterError>;
+    fn supports_live_without_market_discovery(&self) -> bool {
+        false
+    }
+    fn market_from_tick(&self, _tick: &NormalizedPriceTick) -> Option<PriceMarket> {
+        None
+    }
 }
 
 fn decimal_from_value(

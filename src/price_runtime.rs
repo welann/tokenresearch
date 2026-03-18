@@ -368,7 +368,7 @@ where
         let config = config.clone();
         tasks.spawn(async move {
             let mut http_limiter = VenueHttpLimiter::new(config.http_min_interval_ms);
-            let markets = discover_markets_with_retry(
+            let markets = match discover_markets_with_retry(
                 &store,
                 &rest,
                 &clock,
@@ -376,8 +376,19 @@ where
                 &*adapter,
                 &config,
             )
-            .await?;
-            if markets.is_empty() {
+            .await {
+                Ok(markets) => markets,
+                Err(error) if adapter.supports_live_without_market_discovery() => {
+                    warn!(
+                        venue = %adapter.venue(),
+                        error = %error,
+                        "price market discovery failed, continuing with live-only fallback"
+                    );
+                    Vec::new()
+                }
+                Err(error) => return Err(error),
+            };
+            if markets.is_empty() && !adapter.supports_live_without_market_discovery() {
                 return Ok(());
             }
 
@@ -837,6 +848,9 @@ where
         match adapter.parse_ws_message_ticks(&raw, clock.now_ms()) {
             Ok(ticks) => {
                 for tick in ticks {
+                    if let Some(market) = adapter.market_from_tick(&tick) {
+                        store.upsert_price_markets(&[market]).await?;
+                    }
                     let epoch_id = match epoch_by_key.get(&(tick.market.symbol.clone(), tick.kind))
                     {
                         Some(epoch_id) => *epoch_id,

@@ -49,6 +49,42 @@ impl LighterPriceAdapter {
                 })
         })
     }
+
+    fn price_market_from_payload(
+        &self,
+        payload: &Value,
+        updated_at_ms: i64,
+    ) -> Option<PriceMarket> {
+        let market_stats_payload = payload
+            .get("market_stats")
+            .or_else(|| payload.get("data"))
+            .unwrap_or(payload);
+        let market_id = Self::parse_market_id(market_stats_payload.get("market_id"))
+            .or_else(|| Self::parse_market_id(payload.get("market_id")))
+            .or_else(|| Self::channel_market_id(payload.get("channel")))?;
+        let symbol = market_stats_payload
+            .get("symbol")
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+            .or_else(|| {
+                self.symbol_by_market_id
+                    .read()
+                    .expect("rwlock poisoned")
+                    .get(&market_id)
+                    .cloned()
+            })?;
+
+        Some(PriceMarket {
+            market: MarketRef::new(Venue::Lighter, &symbol),
+            venue_market_id: market_id,
+            token: symbol.clone(),
+            quote_asset: "USDC".to_string(),
+            status: MarketStatus::Active,
+            supports_trade_history: true,
+            supports_reference_history: false,
+            updated_at_ms,
+        })
+    }
 }
 
 impl PriceVenueAdapter for LighterPriceAdapter {
@@ -332,5 +368,13 @@ impl PriceVenueAdapter for LighterPriceAdapter {
                 })
             })
             .collect()
+    }
+
+    fn supports_live_without_market_discovery(&self) -> bool {
+        true
+    }
+
+    fn market_from_tick(&self, tick: &NormalizedPriceTick) -> Option<PriceMarket> {
+        self.price_market_from_payload(&tick.raw_payload, tick.received_ts_ms)
     }
 }
