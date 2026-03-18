@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use rust_decimal::Decimal;
 use serde::Deserialize;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::adapters::{DiscoveryRequest, HttpMethod};
 use crate::model::MarketRef;
@@ -301,16 +301,32 @@ where
 {
     store.init().await?;
     let run_id = store.start_price_run(clock.now_ms()).await?;
+    let mut tasks = tokio::task::JoinSet::new();
 
     for adapter in adapters {
-        let markets =
-            discover_markets_with_retry(&store, &rest, &clock, &*adapter, &config).await?;
-        if markets.is_empty() {
-            continue;
-        }
+        let store = store.clone();
+        let rest = rest.clone();
+        let ws = ws.clone();
+        let clock = clock.clone();
+        let config = config.clone();
+        tasks.spawn(async move {
+            let markets =
+                discover_markets_with_retry(&store, &rest, &clock, &*adapter, &config).await?;
+            if markets.is_empty() {
+                return Ok(());
+            }
 
-        backfill_markets(&store, &rest, &clock, &*adapter, &markets, &config, run_id).await?;
-        live_once(&store, &ws, &clock, &*adapter, &markets, run_id).await?;
+            backfill_markets(&store, &rest, &clock, &*adapter, &markets, &config, run_id).await?;
+            live_once(&store, &ws, &clock, &*adapter, &markets, run_id).await
+        });
+    }
+
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => return Err(error),
+            Err(error) => return Err(error.into()),
+        }
     }
 
     let retention_ms = config.sample_retention_days * 24 * 60 * 60 * 1_000;
@@ -345,6 +361,11 @@ where
             Ok(body) => {
                 let markets = adapter.discover_markets(&body)?;
                 store.upsert_price_markets(&markets).await?;
+                info!(
+                    venue = %adapter.venue(),
+                    market_count = markets.len(),
+                    "price market discovery succeeded"
+                );
                 return Ok(markets);
             }
             Err(error) => {
@@ -499,6 +520,12 @@ where
     C: Clock + Send + Sync,
 {
     let mut connection = ws.connect(&adapter.ws_url()).await?;
+    info!(
+        venue = %adapter.venue(),
+        market_count = markets.len(),
+        url = %adapter.ws_url(),
+        "price websocket connected"
+    );
     for message in adapter.subscription_messages(markets) {
         connection.send_text(message).await?;
     }

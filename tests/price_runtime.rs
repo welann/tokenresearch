@@ -8,7 +8,9 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tempfile::tempdir;
 use tokenresearch::model::Venue;
-use tokenresearch::price_adapters::{BinancePriceAdapter, PriceVenueAdapter};
+use tokenresearch::price_adapters::{
+    BinancePriceAdapter, HyperliquidPriceAdapter, PriceVenueAdapter,
+};
 use tokenresearch::price_model::{PriceKind, PriceRangeRequest, PriceResolution};
 use tokenresearch::price_query::PriceQueryStore;
 use tokenresearch::price_runtime::{PriceRuntimeConfig, run_price_runtime_once};
@@ -157,4 +159,140 @@ async fn runtime_discovers_backfills_and_persists_live_prices() {
         .expect("history");
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].points.len(), 2);
+}
+
+#[tokio::test]
+async fn runtime_processes_multiple_venues_without_blocking_on_first_stream() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("token_prices.sqlite");
+    let store = SqlitePriceStore::connect(&db_path).await.expect("connect");
+    store.init().await.expect("init");
+
+    let rest = FakeRest::default();
+    rest.gets.lock().expect("gets").insert(
+        "https://fapi.binance.com/fapi/v1/exchangeInfo".to_string(),
+        common::fixture("price/binance/discovery.json"),
+    );
+    rest.gets.lock().expect("gets").insert(
+        "https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=1m&limit=500&startTime=1710000000000&endTime=1710000119999".to_string(),
+        common::fixture("price/binance/klines_trade.json"),
+    );
+    rest.gets.lock().expect("gets").insert(
+        "https://fapi.binance.com/fapi/v1/markPriceKlines?symbol=BTCUSDT&interval=1m&limit=500&startTime=1710000000000&endTime=1710000119999".to_string(),
+        common::fixture("price/binance/klines_reference.json"),
+    );
+
+    let ws = FakeWsClient::default();
+    ws.messages_by_url.lock().expect("ws").insert(
+        "wss://fstream.binance.com/ws".to_string(),
+        VecDeque::from(vec![
+            common::fixture("price/binance/ws_trade.json"),
+            common::fixture("price/binance/ws_reference.json"),
+        ]),
+    );
+
+    let posts = Arc::new(Mutex::new(HashMap::<(String, String), String>::new()));
+    posts.lock().expect("posts").insert(
+        (
+            "https://api.hyperliquid.xyz/info".to_string(),
+            serde_json::json!({ "type": "meta" }).to_string(),
+        ),
+        common::fixture("price/hyperliquid/discovery.json"),
+    );
+    posts.lock().expect("posts").insert(
+        (
+            "https://api.hyperliquid.xyz/info".to_string(),
+            serde_json::json!({
+                "type": "candleSnapshot",
+                "req": {
+                    "coin": "BTC",
+                    "interval": "1m",
+                    "startTime": 1_710_000_000_000_i64,
+                    "endTime": 1_710_000_119_999_i64,
+                }
+            })
+            .to_string(),
+        ),
+        common::fixture("price/hyperliquid/candles_trade.json"),
+    );
+
+    let rest = FakeRestWithPosts {
+        gets: rest.gets.clone(),
+        posts,
+    };
+
+    ws.messages_by_url.lock().expect("ws").insert(
+        "wss://api.hyperliquid.xyz/ws".to_string(),
+        VecDeque::from(vec![
+            common::fixture("price/hyperliquid/ws_trade.json"),
+            common::fixture("price/hyperliquid/ws_reference.json"),
+        ]),
+    );
+
+    let clock = FakeClock {
+        now_ms: Arc::new(Mutex::new(1_710_000_120_500)),
+    };
+
+    run_price_runtime_once(
+        PriceRuntimeConfig {
+            database_path: db_path.display().to_string(),
+            sample_retention_days: 30,
+            discovery_max_attempts: 1,
+            backfill_minutes_on_empty_start: 2,
+        },
+        store.clone(),
+        rest,
+        ws,
+        clock,
+        vec![
+            Arc::new(BinancePriceAdapter::default()) as Arc<dyn PriceVenueAdapter>,
+            Arc::new(HyperliquidPriceAdapter::default()) as Arc<dyn PriceVenueAdapter>,
+        ],
+    )
+    .await
+    .expect("runtime");
+
+    let query = PriceQueryStore::new(store);
+    let binance = query
+        .latest_price("BTC", PriceKind::Trade, Some(Venue::Binance), None)
+        .await
+        .expect("binance latest");
+    let hyperliquid = query
+        .latest_price("BTC", PriceKind::Trade, Some(Venue::Hyperliquid), None)
+        .await
+        .expect("hyperliquid latest");
+
+    assert_eq!(binance.len(), 1);
+    assert_eq!(hyperliquid.len(), 1);
+}
+
+#[derive(Clone)]
+struct FakeRestWithPosts {
+    gets: Arc<Mutex<HashMap<String, String>>>,
+    posts: Arc<Mutex<HashMap<(String, String), String>>>,
+}
+
+#[async_trait]
+impl RestClient for FakeRestWithPosts {
+    async fn get_text(&self, url: &str) -> DynResult<String> {
+        self.gets
+            .lock()
+            .expect("gets")
+            .get(url)
+            .cloned()
+            .ok_or_else(|| format!("missing GET response for {url}").into())
+    }
+
+    async fn post_json_text(&self, url: &str, body: &Value) -> DynResult<String> {
+        let key = (
+            url.to_string(),
+            serde_json::to_string(body).expect("body json"),
+        );
+        self.posts
+            .lock()
+            .expect("posts")
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| format!("missing POST response for {} {}", url, key.1).into())
+    }
 }
