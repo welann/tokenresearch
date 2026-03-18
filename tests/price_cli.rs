@@ -20,16 +20,28 @@ async fn seed_db() -> (tempfile::TempDir, String) {
     let store = SqlitePriceStore::connect(&db_path).await.expect("connect");
     store.init().await.expect("init");
     store
-        .upsert_price_markets(&[PriceMarket {
-            market: MarketRef::new(Venue::Binance, "BTCUSDT"),
-            venue_market_id: "BTCUSDT".to_string(),
-            token: "BTC".to_string(),
-            quote_asset: "USDT".to_string(),
-            status: MarketStatus::Active,
-            supports_trade_history: true,
-            supports_reference_history: true,
-            updated_at_ms: 1_000,
-        }])
+        .upsert_price_markets(&[
+            PriceMarket {
+                market: MarketRef::new(Venue::Binance, "BTCUSDT"),
+                venue_market_id: "BTCUSDT".to_string(),
+                token: "BTC".to_string(),
+                quote_asset: "USDT".to_string(),
+                status: MarketStatus::Active,
+                supports_trade_history: true,
+                supports_reference_history: true,
+                updated_at_ms: 1_000,
+            },
+            PriceMarket {
+                market: MarketRef::new(Venue::Hyperliquid, "BTC"),
+                venue_market_id: "BTC".to_string(),
+                token: "BTC".to_string(),
+                quote_asset: "USDC".to_string(),
+                status: MarketStatus::Active,
+                supports_trade_history: true,
+                supports_reference_history: false,
+                updated_at_ms: 1_100,
+            },
+        ])
         .await
         .expect("markets");
 
@@ -88,6 +100,54 @@ async fn seed_db() -> (tempfile::TempDir, String) {
         .await
         .expect("commit");
 
+    store
+        .commit_price_batch(PriceCommitBatch {
+            market: MarketRef::new(Venue::Hyperliquid, "BTC"),
+            kind: PriceKind::Trade,
+            epoch_id: Some(2),
+            samples_1s: vec![PriceSample1s {
+                market: MarketRef::new(Venue::Hyperliquid, "BTC"),
+                kind: PriceKind::Trade,
+                bucket_ts_ms: 1_768_772_401_000,
+                open: dec("62020.0"),
+                high: dec("62020.0"),
+                low: dec("62020.0"),
+                close: dec("62020.0"),
+                sample_count: 1,
+                first_exchange_ts_ms: Some(1_768_772_401_100),
+                last_exchange_ts_ms: Some(1_768_772_401_100),
+                updated_at_ms: 1_768_772_402_000,
+            }],
+            candles_1m: vec![PriceCandle1m {
+                market: MarketRef::new(Venue::Hyperliquid, "BTC"),
+                kind: PriceKind::Trade,
+                open_time_ms: 1_767_225_600_000,
+                close_time_ms: 1_767_225_659_999,
+                open: dec("61510.0"),
+                high: dec("61510.0"),
+                low: dec("61510.0"),
+                close: dec("61510.0"),
+                volume: dec("11"),
+                trade_count: Some(4),
+                source: "backfill".to_string(),
+                updated_at_ms: 1_767_225_660_000,
+            }],
+            checkpoint: Some(PriceCheckpoint {
+                market: MarketRef::new(Venue::Hyperliquid, "BTC"),
+                kind: PriceKind::Trade,
+                epoch_id: 2,
+                last_live_bucket_ms: Some(1_768_772_401_000),
+                last_candle_open_ms: Some(1_768_772_401_000),
+                last_backfill_open_ms: Some(1_767_225_600_000),
+                last_exchange_ts_ms: Some(1_768_772_401_100),
+                updated_at_ms: 1_768_772_402_000,
+                status: "live".to_string(),
+            }),
+            gaps: Vec::new(),
+        })
+        .await
+        .expect("commit hyperliquid");
+
     (dir, db_path.display().to_string())
 }
 
@@ -102,7 +162,7 @@ fn price_cli_reads_markets_latest_range_gap_and_health() {
         .expect("price-markets");
     assert!(markets.status.success(), "{markets:?}");
     let markets: Vec<PriceMarket> = serde_json::from_slice(&markets.stdout).expect("markets json");
-    assert_eq!(markets.len(), 1);
+    assert_eq!(markets.len(), 2);
 
     let latest = Command::new(env!("CARGO_BIN_EXE_query"))
         .args([
@@ -119,7 +179,9 @@ fn price_cli_reads_markets_latest_range_gap_and_health() {
         .expect("price-latest");
     assert!(latest.status.success(), "{latest:?}");
     let latest: Vec<LatestPrice> = serde_json::from_slice(&latest.stdout).expect("latest json");
-    assert_eq!(latest[0].close.to_string(), "62010.0");
+    assert_eq!(latest.len(), 2);
+    assert!(latest.iter().any(|row| row.venue == Venue::Binance));
+    assert!(latest.iter().any(|row| row.venue == Venue::Hyperliquid));
 
     let range = Command::new(env!("CARGO_BIN_EXE_query"))
         .args([
@@ -142,7 +204,59 @@ fn price_cli_reads_markets_latest_range_gap_and_health() {
         .expect("price-range");
     assert!(range.status.success(), "{range:?}");
     let range: Vec<PriceSeries> = serde_json::from_slice(&range.stdout).expect("range json");
-    assert_eq!(range.len(), 1);
+    assert_eq!(range.len(), 2);
+
+    let latest_binance = Command::new(env!("CARGO_BIN_EXE_query"))
+        .args([
+            "--price-db",
+            &db_path,
+            "--json",
+            "price-latest",
+            "--token",
+            "BTC",
+            "--venue",
+            "binance",
+            "--kind",
+            "trade",
+        ])
+        .output()
+        .expect("price-latest venue");
+    assert!(latest_binance.status.success(), "{latest_binance:?}");
+    let latest_binance: Vec<LatestPrice> =
+        serde_json::from_slice(&latest_binance.stdout).expect("latest venue json");
+    assert_eq!(latest_binance.len(), 1);
+    assert_eq!(latest_binance[0].venue, Venue::Binance);
+    assert_eq!(latest_binance[0].market_symbol, "BTCUSDT");
+
+    let range_market = Command::new(env!("CARGO_BIN_EXE_query"))
+        .args([
+            "--price-db",
+            &db_path,
+            "--json",
+            "price-range",
+            "--token",
+            "BTC",
+            "--venue",
+            "binance",
+            "--symbol",
+            "BTCUSDT",
+            "--kind",
+            "trade",
+            "--start-ms",
+            "1767225600000",
+            "--end-ms",
+            "1767225659999",
+            "--resolution",
+            "1m",
+        ])
+        .output()
+        .expect("price-range market");
+    assert!(range_market.status.success(), "{range_market:?}");
+    let range_market: Vec<PriceSeries> =
+        serde_json::from_slice(&range_market.stdout).expect("range market json");
+    assert_eq!(range_market.len(), 1);
+    assert_eq!(range_market[0].venue, Venue::Binance);
+    assert_eq!(range_market[0].market_symbol, "BTCUSDT");
 
     let gaps = Command::new(env!("CARGO_BIN_EXE_query"))
         .args([

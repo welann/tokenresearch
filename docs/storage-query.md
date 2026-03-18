@@ -470,6 +470,18 @@ cargo run --bin query -- \
   --kind trade
 ```
 
+`price-latest`，只看某一家交易所：
+
+```bash
+cargo run --bin query -- \
+  --price-db token_prices.sqlite \
+  --json \
+  price-latest \
+  --token BTC \
+  --venue hyperliquid \
+  --kind trade
+```
+
 `price-range`，查询指定时间范围：
 
 ```bash
@@ -478,6 +490,22 @@ cargo run --bin query -- \
   --json \
   price-range \
   --token BTC \
+  --kind trade \
+  --start-ms 1767225600000 \
+  --end-ms 1768435200000 \
+  --resolution 1m
+```
+
+`price-range`，只看某个原始市场：
+
+```bash
+cargo run --bin query -- \
+  --price-db token_prices.sqlite \
+  --json \
+  price-range \
+  --token BTC \
+  --venue binance \
+  --symbol BTCUSDT \
   --kind trade \
   --start-ms 1767225600000 \
   --end-ms 1768435200000 \
