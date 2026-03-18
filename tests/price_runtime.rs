@@ -1,6 +1,7 @@
 mod common;
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -70,6 +71,28 @@ impl WsConnection for FakeConnection {
     }
 }
 
+struct FakeWaitForHistoryConnection {
+    messages: VecDeque<String>,
+    history_requested: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl WsConnection for FakeWaitForHistoryConnection {
+    async fn send_text(&mut self, _text: String) -> DynResult<()> {
+        Ok(())
+    }
+
+    async fn next_text(&mut self) -> DynResult<Option<String>> {
+        if let Some(message) = self.messages.pop_front() {
+            return Ok(Some(message));
+        }
+        while !self.history_requested.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+        Ok(None)
+    }
+}
+
 #[derive(Clone, Default)]
 struct FakeWsClient {
     messages_by_url: Arc<Mutex<HashMap<String, VecDeque<String>>>>,
@@ -120,6 +143,60 @@ impl RestClient for FakeSequencedRest {
 
     async fn post_json_text(&self, _url: &str, _body: &Value) -> DynResult<String> {
         Err("unexpected POST".into())
+    }
+}
+
+#[derive(Clone, Default)]
+struct FakeLiveFirstRest {
+    gets: Arc<Mutex<HashMap<String, String>>>,
+    ws_connected: Arc<AtomicBool>,
+    history_requested: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl RestClient for FakeLiveFirstRest {
+    async fn get_text(&self, url: &str) -> DynResult<String> {
+        let is_discovery = url == "https://fapi.binance.com/fapi/v1/exchangeInfo";
+        if !is_discovery {
+            self.history_requested.store(true, Ordering::SeqCst);
+            if !self.ws_connected.load(Ordering::SeqCst) {
+                return Err("history requested before websocket connect".into());
+            }
+        }
+        self.gets
+            .lock()
+            .expect("gets")
+            .get(url)
+            .cloned()
+            .ok_or_else(|| format!("missing GET response for {url}").into())
+    }
+
+    async fn post_json_text(&self, _url: &str, _body: &Value) -> DynResult<String> {
+        Err("unexpected POST".into())
+    }
+}
+
+#[derive(Clone, Default)]
+struct FakeLiveFirstWsClient {
+    messages_by_url: Arc<Mutex<HashMap<String, VecDeque<String>>>>,
+    ws_connected: Arc<AtomicBool>,
+    history_requested: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl WsClient for FakeLiveFirstWsClient {
+    async fn connect(&self, url: &str) -> DynResult<Box<dyn WsConnection>> {
+        self.ws_connected.store(true, Ordering::SeqCst);
+        let messages = self
+            .messages_by_url
+            .lock()
+            .expect("ws map")
+            .remove(url)
+            .ok_or_else(|| format!("missing WS response for {url}"))?;
+        Ok(Box::new(FakeWaitForHistoryConnection {
+            messages,
+            history_requested: self.history_requested.clone(),
+        }))
     }
 }
 
@@ -479,6 +556,62 @@ async fn runtime_throttles_http_requests_per_venue() {
         .expect("times");
     assert_eq!(request_times.len(), 2);
     assert!(request_times[1] - request_times[0] >= 1_000);
+}
+
+#[tokio::test]
+async fn runtime_starts_live_before_backfill_requests() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("token_prices.sqlite");
+    let store = SqlitePriceStore::connect(&db_path).await.expect("connect");
+    store.init().await.expect("init");
+
+    let ws_connected = Arc::new(AtomicBool::new(false));
+    let history_requested = Arc::new(AtomicBool::new(false));
+
+    let rest = FakeLiveFirstRest {
+        gets: Arc::new(Mutex::new(HashMap::from([
+            (
+                "https://fapi.binance.com/fapi/v1/exchangeInfo".to_string(),
+                common::fixture("price/binance/discovery.json"),
+            ),
+            (
+                "https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=1m&limit=500&startTime=1709913720000&endTime=1709943719999".to_string(),
+                common::fixture("price/binance/klines_trade.json"),
+            ),
+        ]))),
+        ws_connected: ws_connected.clone(),
+        history_requested: history_requested.clone(),
+    };
+    let ws = FakeLiveFirstWsClient {
+        messages_by_url: Arc::new(Mutex::new(HashMap::from([(
+            "wss://fstream.binance.com/stream?streams=!ticker@arr/!markPrice@arr@1s".to_string(),
+            VecDeque::from(vec![common::fixture("price/binance/ws_trade.json")]),
+        )]))),
+        ws_connected: ws_connected.clone(),
+        history_requested: history_requested.clone(),
+    };
+
+    run_price_runtime_once(
+        PriceRuntimeConfig {
+            database_path: db_path.display().to_string(),
+            sample_retention_days: 30,
+            discovery_max_attempts: 1,
+            backfill_window_days: 1,
+            http_min_interval_ms: 0,
+        },
+        store,
+        rest,
+        ws,
+        FakeClock {
+            now_ms: Arc::new(Mutex::new(1_710_000_120_500)),
+        },
+        vec![Arc::new(BinancePriceAdapter::default()) as Arc<dyn PriceVenueAdapter>],
+    )
+    .await
+    .expect("runtime");
+
+    assert!(ws_connected.load(Ordering::SeqCst));
+    assert!(history_requested.load(Ordering::SeqCst));
 }
 
 #[derive(Clone)]

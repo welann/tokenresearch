@@ -411,6 +411,11 @@ where
         let mut backoff_ms = self.config.reconnect_backoff_ms;
         loop {
             let ws_url = adapter.ws_url(&markets);
+            tracing::info!(
+                url = %ws_url,
+                market_count = markets.len(),
+                "binance websocket connecting"
+            );
             let mut connection = match ws.connect(&ws_url).await {
                 Ok(connection) => connection,
                 Err(error) => {
@@ -426,6 +431,11 @@ where
                 }
             };
             backoff_ms = self.config.reconnect_backoff_ms;
+            tracing::info!(
+                url = %ws_url,
+                market_count = markets.len(),
+                "binance websocket connected"
+            );
 
             let market_by_symbol = markets
                 .iter()
@@ -573,6 +583,12 @@ where
         let mut backoff_ms = self.config.reconnect_backoff_ms;
         loop {
             let ws_url = adapter.ws_url(&markets);
+            tracing::info!(
+                venue = %adapter.venue().as_str(),
+                url = %ws_url,
+                market_count = markets.len(),
+                "generic websocket connecting"
+            );
             let mut connection = match ws.connect(&ws_url).await {
                 Ok(connection) => connection,
                 Err(error) => {
@@ -589,6 +605,12 @@ where
                 }
             };
             backoff_ms = self.config.reconnect_backoff_ms;
+            tracing::info!(
+                venue = %adapter.venue().as_str(),
+                url = %ws_url,
+                market_count = markets.len(),
+                "generic websocket connected"
+            );
 
             for message in adapter.subscription_messages(&markets) {
                 connection.send_text(message).await?;

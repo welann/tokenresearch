@@ -381,18 +381,82 @@ where
                 return Ok(());
             }
 
-            backfill_markets(
-                &store,
-                &rest,
-                &clock,
-                &mut http_limiter,
-                &*adapter,
-                &markets,
-                &config,
-                run_id,
-            )
-            .await?;
-            live_once(&store, &ws, &clock, &*adapter, &markets, run_id).await
+            let (live_ready_tx, live_ready_rx) = tokio::sync::oneshot::channel();
+            let live_store = store.clone();
+            let live_ws = ws.clone();
+            let live_clock = clock.clone();
+            let live_adapter = adapter.clone();
+            let live_markets = markets.clone();
+            let live_task = tokio::spawn(async move {
+                live_once(
+                    &live_store,
+                    &live_ws,
+                    &live_clock,
+                    &*live_adapter,
+                    &live_markets,
+                    run_id,
+                    Some(live_ready_tx),
+                )
+                .await
+            });
+
+            match live_ready_rx.await {
+                Ok(()) => {}
+                Err(_) => {
+                    return match live_task.await {
+                        Ok(result) => result,
+                        Err(error) => Err(error.into()),
+                    };
+                }
+            }
+
+            let backfill_store = store.clone();
+            let backfill_rest = rest.clone();
+            let backfill_clock = clock.clone();
+            let backfill_adapter = adapter.clone();
+            let backfill_market_list = markets.clone();
+            let backfill_config = config.clone();
+            let backfill_task = tokio::spawn(async move {
+                if let Err(error) = backfill_markets(
+                    &backfill_store,
+                    &backfill_rest,
+                    &backfill_clock,
+                    &mut http_limiter,
+                    &*backfill_adapter,
+                    &backfill_market_list,
+                    &backfill_config,
+                    run_id,
+                )
+                .await
+                {
+                    warn!(
+                        venue = %backfill_adapter.venue(),
+                        error = %error,
+                        "price backfill worker failed"
+                    );
+                }
+            });
+
+            match live_task.await {
+                Ok(Ok(())) => {
+                    let _ = backfill_task.await;
+                    Ok(())
+                }
+                Ok(Err(error)) => {
+                    if !backfill_task.is_finished() {
+                        backfill_task.abort();
+                    }
+                    let _ = backfill_task.await;
+                    Err(error)
+                }
+                Err(error) => {
+                    if !backfill_task.is_finished() {
+                        backfill_task.abort();
+                    }
+                    let _ = backfill_task.await;
+                    Err(error.into())
+                }
+            }
         });
     }
 
@@ -715,6 +779,7 @@ async fn live_once<S, W, C>(
     adapter: &dyn PriceVenueAdapter,
     markets: &[PriceMarket],
     run_id: i64,
+    ready_tx: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> DynResult<()>
 where
     S: PriceStore + Send + Sync,
@@ -722,6 +787,12 @@ where
     C: Clock + Send + Sync,
 {
     let ws_url = adapter.ws_url();
+    info!(
+        venue = %adapter.venue(),
+        market_count = markets.len(),
+        url = %ws_url,
+        "price websocket connecting"
+    );
     let mut connection = ws.connect(&ws_url).await.map_err(|error| {
         io::Error::other(format!(
             "price websocket connect failed venue={} url={} error={}",
@@ -747,6 +818,9 @@ where
                 error,
             ))
         })?;
+    }
+    if let Some(ready_tx) = ready_tx {
+        let _ = ready_tx.send(());
     }
 
     let mut epoch_by_key: HashMap<(String, PriceKind), i64> = HashMap::new();

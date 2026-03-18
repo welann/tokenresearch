@@ -89,6 +89,7 @@ flowchart LR
 ## 当前已知边界
 
 - 当前 `pricecollector` 采用 cycle + reconnect 方式，live websocket 断开后重新进入 discovery/backfill/live 周期
+- 每个 venue 会先建立 live websocket，再在后台按限速慢慢执行 backfill
 - 当前 `reference` 历史只对 Binance 做官方回补
 - 当前 `1s` 样本是最近窗口的高频查询层，不是长期归档层
 - 历史回补窗口默认是“当前时间往前 90 天”，通过 `backfill_window_days` 配置
