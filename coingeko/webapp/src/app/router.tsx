@@ -24,6 +24,11 @@ const StructurePage = lazy(async () => {
   return { default: module.StructurePage };
 });
 
+const SourcesPage = lazy(async () => {
+  const module = await import("../pages/SourcesPage");
+  return { default: module.SourcesPage };
+});
+
 function RouteFallback({ children }: { children: ReactNode }) {
   return (
     <Suspense
@@ -88,6 +93,14 @@ export const router = createHashRouter([
         element: (
           <RouteFallback>
             <StructurePage />
+          </RouteFallback>
+        ),
+      },
+      {
+        path: "sources",
+        element: (
+          <RouteFallback>
+            <SourcesPage />
           </RouteFallback>
         ),
       },

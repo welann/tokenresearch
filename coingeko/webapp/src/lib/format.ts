@@ -31,6 +31,34 @@ export function formatNumber(value: number | null | undefined, digits = 0): stri
   }).format(value);
 }
 
+export function formatTableValue(value: unknown, key = ""): string {
+  if (value === null || value === undefined) {
+    return "N/A";
+  }
+  if (typeof value === "number") {
+    if (Number.isNaN(value)) {
+      return "N/A";
+    }
+    const normalizedKey = key.toLowerCase();
+    if (
+      normalizedKey.includes("price") ||
+      normalizedKey.includes("marketcap") ||
+      normalizedKey.includes("market_cap") ||
+      normalizedKey.includes("volume")
+    ) {
+      return formatCurrency(value, 2);
+    }
+    if (normalizedKey.includes("return") || normalizedKey.includes("drawdown")) {
+      return formatPercent(value, 2);
+    }
+    return formatNumber(value, 4);
+  }
+  if (typeof value === "boolean") {
+    return value ? "True" : "False";
+  }
+  return String(value);
+}
+
 export function titleFromSlug(slug: string): string {
   return slug
     .split("-")

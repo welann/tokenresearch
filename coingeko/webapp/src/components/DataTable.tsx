@@ -11,11 +11,22 @@ type Column<T> = {
 type DataTableProps<T> = {
   rows: T[];
   columns: Array<Column<T>>;
+  getRowKey?: (row: T, index: number) => string;
+  emptyMessage?: string;
+  initialSortKey?: string | null;
+  initialDescending?: boolean;
 };
 
-export function DataTable<T>({ rows, columns }: DataTableProps<T>) {
-  const [sortKey, setSortKey] = useState<string | null>(null);
-  const [descending, setDescending] = useState(true);
+export function DataTable<T>({
+  rows,
+  columns,
+  getRowKey,
+  emptyMessage = "No rows match the current filters.",
+  initialSortKey = null,
+  initialDescending = true,
+}: DataTableProps<T>) {
+  const [sortKey, setSortKey] = useState<string | null>(initialSortKey);
+  const [descending, setDescending] = useState(initialDescending);
 
   const activeColumn = columns.find((column) => column.key === sortKey);
   const sortedRows = activeColumn?.sortValue
@@ -60,15 +71,23 @@ export function DataTable<T>({ rows, columns }: DataTableProps<T>) {
           </tr>
         </thead>
         <tbody>
-          {sortedRows.map((row: T, index: number) => (
-            <tr key={index}>
-              {columns.map((column) => (
-                <td key={column.key} className={column.className}>
-                  {column.render(row)}
-                </td>
-              ))}
+          {sortedRows.length === 0 ? (
+            <tr>
+              <td className="table-empty" colSpan={columns.length}>
+                {emptyMessage}
+              </td>
             </tr>
-          ))}
+          ) : (
+            sortedRows.map((row: T, index: number) => (
+              <tr key={getRowKey ? getRowKey(row, index) : `${index}`}>
+                {columns.map((column) => (
+                  <td key={column.key} className={column.className}>
+                    {column.render(row)}
+                  </td>
+                ))}
+              </tr>
+            ))
+          )}
         </tbody>
       </table>
     </div>

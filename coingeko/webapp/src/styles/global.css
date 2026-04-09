@@ -39,7 +39,8 @@ a {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -209,6 +210,10 @@ input {
   margin-bottom: 18px;
 }
 
+.panel-actions {
+  width: min(100%, 560px);
+}
+
 .panel-title {
   margin: 0;
   font-size: 1.25rem;
@@ -260,6 +265,10 @@ input {
   cursor: pointer;
 }
 
+.table-empty {
+  color: var(--muted);
+}
+
 .inline-chip {
   display: inline-flex;
   align-items: center;
@@ -284,6 +293,29 @@ input {
   border: 1px solid var(--line);
   border-radius: 16px;
   background: rgba(255, 255, 255, 0.74);
+}
+
+.control-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+}
+
+.control-grid-compact {
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+}
+
+.control-field {
+  display: grid;
+  gap: 6px;
+}
+
+.control-field span {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
 }
 
 .split-layout {
@@ -362,6 +394,58 @@ input {
   font-size: 0.9rem;
 }
 
+.info-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.info-pair {
+  display: grid;
+  gap: 6px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.info-pair span {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.info-pair strong {
+  font-size: 1rem;
+  line-height: 1.4;
+}
+
+.source-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.source-card {
+  display: grid;
+  gap: 6px;
+  padding: 16px;
+  border-radius: 18px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.52);
+  text-align: left;
+  cursor: pointer;
+  transition: transform 180ms ease, border-color 180ms ease, background 180ms ease;
+}
+
+.source-card:hover,
+.source-card.active {
+  transform: translateY(-2px);
+  border-color: rgba(16, 32, 51, 0.2);
+  background: rgba(255, 255, 255, 0.84);
+}
+
 @media (max-width: 1100px) {
   .app-shell {
     grid-template-columns: 1fr;
@@ -377,7 +461,8 @@ input {
   .page-hero,
   .split-layout,
   .page-columns,
-  .metric-grid {
+  .metric-grid,
+  .info-grid {
     grid-template-columns: 1fr;
   }
 
