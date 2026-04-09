@@ -1,0 +1,17 @@
+[project]
+name = "coingeko"
+version = "0.1.0"
+description = "CoinGecko daily research metrics pipeline"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "arch>=8.0.0",
+    "networkx>=3.5",
+    "numpy>=2.3.0",
+    "pandas>=2.3.0",
+    "pyarrow>=20.0.0",
+    "requests>=2.33.1",
+    "scikit-learn>=1.7.0",
+    "scipy>=1.16.0",
+    "statsmodels>=0.14.5",
+]
