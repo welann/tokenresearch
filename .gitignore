@@ -9,3 +9,7 @@ token_prices.sqlite-wal
 *.csv
 *.pyc
 *.txt
+*.tsbuildinfo
+coingeko/webapp/node_modules/
+coingeko/webapp/dist/
+coingeko/webapp/public/data/

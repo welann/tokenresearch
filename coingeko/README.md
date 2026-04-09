@@ -4,6 +4,7 @@
 
 - `coingecko_top300_daily.py`：抓取 Top300 原始数据
 - `metrics/`：基于日频 CSV 计算研究指标
+- `webapp/`：静态 React 可视化前端
 
 推荐流程：
 
@@ -22,6 +23,28 @@ uv run python -m metrics.cli structure --out-dir analysis_out
 uv run python -m metrics.cli ccf --out-dir analysis_out
 uv run python -m metrics.cli granger --out-dir analysis_out
 uv run python -m metrics.cli dcc --out-dir analysis_out
+```
+
+静态前端的数据导出与构建：
+
+```bash
+cd coingeko
+uv run python -m metrics.cli web-export \
+  --analysis-dir analysis_out \
+  --out-dir webapp/public/data \
+  --top-pairs 24 \
+  --heatmap-coins 16
+
+cd webapp
+npm install
+npm run build
+```
+
+开发模式：
+
+```bash
+cd coingeko/webapp
+npm run dev
 ```
 
 核心输出目录：

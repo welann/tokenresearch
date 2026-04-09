@@ -20,7 +20,7 @@ from .config import (
     DEFAULT_RISK_WINDOWS,
     DEFAULT_ROLLING_WINDOWS,
 )
-from . import dcc, io, leadlag, market_model, pairwise, panel, risk, structure
+from . import dcc, io, leadlag, market_model, pairwise, panel, risk, structure, web_export
 from .utils import parse_int_csv
 
 
@@ -256,6 +256,17 @@ def cmd_dcc(args: argparse.Namespace) -> None:
     print(f"wrote {row_count} rows across {len(candidates)} candidate pairs -> {paths.dcc_garch}")
 
 
+def cmd_web_export(args: argparse.Namespace) -> None:
+    out_dir = web_export.export_static_web_data(
+        analysis_dir=args.analysis_dir,
+        out_dir=args.out_dir,
+        top_pair_count=args.top_pairs,
+        heatmap_coin_count=args.heatmap_coins,
+        corr_threshold=args.corr_threshold,
+    )
+    print(f"exported static web data -> {out_dir}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="CoinGecko metrics research pipeline")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -434,6 +445,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     dcc_parser.add_argument("--max-pairs", type=int, default=None, help="optional maximum pair count")
     dcc_parser.set_defaults(func=cmd_dcc)
+
+    web_export_parser = subparsers.add_parser("web-export", help="export slim JSON files for the static frontend")
+    web_export_parser.add_argument(
+        "--analysis-dir",
+        default="analysis_out",
+        help="directory containing prepared analysis CSV outputs",
+    )
+    web_export_parser.add_argument(
+        "--out-dir",
+        default="webapp/public/data",
+        help="output directory for generated static JSON assets",
+    )
+    web_export_parser.add_argument(
+        "--top-pairs",
+        type=int,
+        default=web_export.DEFAULT_TOP_PAIR_COUNT,
+        help="number of featured pair detail files to export",
+    )
+    web_export_parser.add_argument(
+        "--heatmap-coins",
+        type=int,
+        default=web_export.DEFAULT_HEATMAP_COIN_COUNT,
+        help="number of top-ranked assets to include in the structure heatmap",
+    )
+    web_export_parser.add_argument(
+        "--corr-threshold",
+        type=float,
+        default=DEFAULT_CORR_THRESHOLD,
+        help="abs Pearson correlation threshold for centrality graph edges",
+    )
+    web_export_parser.set_defaults(func=cmd_web_export)
 
     return parser
 
